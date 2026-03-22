@@ -32,9 +32,9 @@ on:
         options: ["10","9","8","7","6","5","4","3","2","1","0","-1","-2","-3"]
 
       crf:
-        description: "CRF quality (32–42 for small encode; lower = better/bigger)"
+        description: "CRF quality (44–52 for 200–400 kbps; lower = better/bigger)"
         required: false
-        default: "38"
+        default: "50"
         type: string
 
       tune:
