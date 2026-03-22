@@ -1,0 +1,346 @@
+name: Encode Anime
+
+# ─────────────────────────────────────────────────────────────
+#  Trigger: manual only — paste a direct video URL and tweak
+#  the encoding options below, then click "Run workflow".
+# ─────────────────────────────────────────────────────────────
+on:
+  workflow_dispatch:
+    inputs:
+
+      video_url:
+        description: "Direct URL to source video (mkv/mp4/etc.)"
+        required: true
+        type: string
+
+      output_name:
+        description: "Output filename (no extension)"
+        required: false
+        default: "encoded_anime"
+        type: string
+
+      # ── SVT-AV1-PSY encoder controls ──────────────────────
+      preset:
+        description: |
+          SVT-AV1 speed preset.
+          10 = fastest / lowest quality
+           0 = slowest / highest quality
+          -1, -2, -3 = extra-slow (PSY fork only)
+        required: false
+        default: "4"
+        type: choice
+        options: ["10","9","8","7","6","5","4","3","2","1","0","-1","-2","-3"]
+
+      crf:
+        description: "CRF quality (32–42 for small encode; lower = better/bigger)"
+        required: false
+        default: "38"
+        type: string
+
+      tune:
+        description: "Perceptual tune (subjective ssim recommended for anime)"
+        required: false
+        default: "subjective ssim"
+        type: choice
+        options:
+          - "subjective ssim"
+          - "still picture"
+          - "vq"
+          - "psnr"
+          - "ssim"
+
+      # ── Film grain synthesis ───────────────────────────────
+      film_grain:
+        description: |
+          Synthetic grain strength (0 = off).
+          8–12 suits most TV anime; raise to 20+ for grainy film-sourced anime.
+        required: false
+        default: "6"
+        type: string
+
+      film_grain_denoise:
+        description: "Denoise source before adding grain? (1=yes, 0=no)"
+        required: false
+        default: "0"
+        type: choice
+        options: ["0","1"]
+
+      # ── Video filters ──────────────────────────────────────
+      detelecine:
+        description: "Detelecine (remove 3:2 pulldown — for interlaced NTSC rips)"
+        required: false
+        default: "false"
+        type: boolean
+
+      decomb:
+        description: "Adaptive deinterlace/decomb (for interlaced sources)"
+        required: false
+        default: "false"
+        type: boolean
+
+      # ── Audio ──────────────────────────────────────────────
+      audio_mode:
+        description: "Audio handling"
+        required: false
+        default: "opus"
+        type: choice
+        options:
+          - "copy"           # passthrough all tracks unchanged
+          - "opus"           # re-encode to Opus 48k stereo
+          - "flac"           # lossless
+
+      # ── Extra raw HandBrakeCLI flags (advanced) ────────────
+      extra_flags:
+        description: "Any extra HandBrakeCLI flags (appended verbatim)"
+        required: false
+        default: ""
+        type: string
+
+
+jobs:
+  encode:
+    name: "Encode → ${{ inputs.output_name }}.mkv"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360          # 6-hour hard cap
+
+    steps:
+
+    # ── 1. Grab the pre-built HandBrakeCLI (PSY patched) ────
+    - name: Download HandBrakeCLI (SVT-AV1-PSY build)
+      run: |
+        echo "::group::Fetching latest HandBrakeCLI from Uranite/HandBrake-5fish-SVT-AV1-PSY"
+
+        ASSET_URL=$(curl -fsSL \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/Uranite/HandBrake-5fish-SVT-AV1-PSY/releases/tags/ubuntu" \
+          | jq -r '.assets[] | select(.name | test("HandBrakeCLI")) | .browser_download_url' \
+          | head -1)
+
+        if [[ -z "$ASSET_URL" ]]; then
+          echo "ERROR: Could not locate HandBrakeCLI asset in the release." >&2
+          exit 1
+        fi
+
+        echo "Downloading: $ASSET_URL"
+        curl -fsSL "$ASSET_URL" -o HandBrakeCLI
+        chmod +x HandBrakeCLI
+
+        echo "HandBrakeCLI version:"
+        ./HandBrakeCLI --version 2>&1 | head -5
+        echo "::endgroup::"
+
+    # ── 2. Install runtime dependencies ─────────────────────
+    - name: Install runtime libs & tools
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          aria2 ffprobe \
+          libjansson4 libass9 libturbojpeg0 \
+          libvorbis0a libopus0 libmp3lame0 \
+          libtheora0 libspeex1 libxml2 libvpx9 \
+          libnuma1 libssl3 libdrm2 libva2 libva-drm2
+
+    # ── 3. Download source video ─────────────────────────────
+    - name: Download source video
+      run: |
+        echo "::group::Downloading source from URL"
+        mkdir -p source
+
+        # aria2c: multi-connection download, shows progress
+        aria2c \
+          --out="source/input" \
+          --dir="." \
+          --split=8 \
+          --max-connection-per-server=8 \
+          --min-split-size=5M \
+          --allow-overwrite=true \
+          --console-log-level=notice \
+          "${{ inputs.video_url }}"
+
+        # Detect real extension from the downloaded file
+        EXT=$(file -b --extension source/input | cut -d'/' -f1)
+        case "$EXT" in
+          mkv|mk*)   EXT="mkv" ;;
+          mp4|m4v*)  EXT="mp4" ;;
+          avi)       EXT="avi" ;;
+          ts|mpeg*)  EXT="ts"  ;;
+          *)         EXT="mkv" ;;   # safe default
+        esac
+        mv source/input "source/input.$EXT"
+
+        echo "SOURCE_FILE=source/input.$EXT" >> $GITHUB_ENV
+        echo "SOURCE_EXT=$EXT"               >> $GITHUB_ENV
+
+        echo "Downloaded file info:"
+        ls -lh "source/input.$EXT"
+        echo "::endgroup::"
+
+    # ── 4. Probe source metadata ─────────────────────────────
+    - name: Probe source metadata
+      run: |
+        echo "### Source File Info" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        ffprobe -v quiet -print_format json -show_format -show_streams \
+          "$SOURCE_FILE" 2>&1 \
+          | python3 -c "
+        import sys, json
+        d = json.load(sys.stdin)
+        fmt = d.get('format', {})
+        print(f'Container : {fmt.get(\"format_long_name\", \"?\")}')
+        print(f'Duration  : {float(fmt.get(\"duration\",0))/60:.1f} min')
+        print(f'File size : {int(fmt.get(\"size\",0))/1024/1024:.1f} MB')
+        for s in d.get('streams', []):
+            ct = s.get('codec_type','?')
+            cn = s.get('codec_name','?')
+            if ct == 'video':
+                print(f'Video     : {cn}  {s.get(\"width\")}x{s.get(\"height\")}  {s.get(\"r_frame_rate\",\"?\")} fps')
+            elif ct == 'audio':
+                print(f'Audio     : {cn}  {s.get(\"channel_layout\",\"?\")}  {int(s.get(\"bit_rate\",0))//1000}k')
+            elif ct == 'subtitle':
+                print(f'Subtitle  : {cn}  ({s.get(\"tags\",{}).get(\"language\",\"?\")})')
+        " >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+    # ── 5. Build HandBrakeCLI argument list ──────────────────
+    - name: Build encoder flags
+      run: |
+        OUTPUT_FILE="${{ inputs.output_name }}.mkv"
+        echo "OUTPUT_FILE=$OUTPUT_FILE" >> $GITHUB_ENV
+
+        # ── Core SVT-AV1-PSY options ──
+        ENCODER_OPTS="film-grain=${{ inputs.film_grain }}:film-grain-denoise=${{ inputs.film_grain_denoise }}"
+        ENCODER_OPTS="${ENCODER_OPTS}:enable-overlays=1"       # better flat colour regions (anime)
+        ENCODER_OPTS="${ENCODER_OPTS}:scd=1"                   # scene-change detection
+
+        # ── Audio flags ──
+        case "${{ inputs.audio_mode }}" in
+          copy)
+            AUDIO_FLAGS="--aencoder copy"
+            ;;
+          opus)
+            AUDIO_FLAGS="--aencoder opus --ab 48 --mixdown stereo"
+            ;;
+          flac)
+            AUDIO_FLAGS="--aencoder flac24"
+            ;;
+        esac
+
+        # ── Video filter flags ──
+        FILTER_FLAGS=""
+        if [[ "${{ inputs.detelecine }}" == "true" ]]; then
+          FILTER_FLAGS="$FILTER_FLAGS --detelecine"
+        fi
+        if [[ "${{ inputs.decomb }}" == "true" ]]; then
+          FILTER_FLAGS="$FILTER_FLAGS --comb-detect --decomb"
+        fi
+
+        echo "ENCODER_OPTS=$ENCODER_OPTS" >> $GITHUB_ENV
+        echo "AUDIO_FLAGS=$AUDIO_FLAGS"   >> $GITHUB_ENV
+        echo "FILTER_FLAGS=$FILTER_FLAGS" >> $GITHUB_ENV
+
+        # Print summary
+        echo "### Encode Settings" >> $GITHUB_STEP_SUMMARY
+        echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
+        echo "| Encoder | SVT-AV1 (5fish-PSY) |" >> $GITHUB_STEP_SUMMARY
+        echo "| Preset | ${{ inputs.preset }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| CRF | ${{ inputs.crf }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Tune | ${{ inputs.tune }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Film grain | ${{ inputs.film_grain }} (denoise=${{ inputs.film_grain_denoise }}) |" >> $GITHUB_STEP_SUMMARY
+        echo "| Audio | ${{ inputs.audio_mode }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Detelecine | ${{ inputs.detelecine }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Decomb | ${{ inputs.decomb }} |" >> $GITHUB_STEP_SUMMARY
+
+    # ── 6. Encode ────────────────────────────────────────────
+    - name: Encode with HandBrakeCLI
+      run: |
+        echo "::group::HandBrakeCLI encode"
+
+        # Note: HandBrakeCLI writes progress to stderr; redirect both streams
+        ./HandBrakeCLI \
+          --input  "$SOURCE_FILE" \
+          --output "$OUTPUT_FILE" \
+          \
+          --encoder       svt_av1 \
+          --encoder-preset "${{ inputs.preset }}" \
+          --quality        "${{ inputs.crf }}" \
+          --encoder-tune   "${{ inputs.tune }}" \
+          --encoder-profile main \
+          --encoder-opt    "$ENCODER_OPTS" \
+          \
+          $AUDIO_FLAGS \
+          $FILTER_FLAGS \
+          \
+          --all-subtitles \
+          --markers \
+          \
+          ${{ inputs.extra_flags }} \
+          2>&1 | tee encode.log
+
+        EXIT_CODE=${PIPESTATUS[0]}
+        echo "::endgroup::"
+
+        if [[ $EXIT_CODE -ne 0 ]]; then
+          echo "::error::HandBrakeCLI exited with code $EXIT_CODE"
+          exit $EXIT_CODE
+        fi
+
+    # ── 7. Encode report ─────────────────────────────────────
+    - name: Encode report
+      if: always()
+      run: |
+        if [[ -f "$OUTPUT_FILE" ]]; then
+          SRC_SIZE=$(stat -c %s "$SOURCE_FILE")
+          OUT_SIZE=$(stat -c %s "$OUTPUT_FILE")
+          RATIO=$(python3 -c "print(f'{$OUT_SIZE/$SRC_SIZE*100:.1f}%')")
+
+          echo "### Encode Result" >> $GITHUB_STEP_SUMMARY
+          echo "| | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source | $(numfmt --to=iec $SRC_SIZE)B |" >> $GITHUB_STEP_SUMMARY
+          echo "| Output | $(numfmt --to=iec $OUT_SIZE)B |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ratio  | $RATIO of source |" >> $GITHUB_STEP_SUMMARY
+
+          echo "Output file info:"
+          ffprobe -v quiet -print_format json -show_format -show_streams "$OUTPUT_FILE" 2>&1 \
+            | python3 -c "
+        import sys, json
+        d = json.load(sys.stdin)
+        fmt = d.get('format', {})
+        print(f'Duration : {float(fmt.get(\"duration\",0))/60:.1f} min')
+        for s in d.get('streams', []):
+            ct = s.get('codec_type','?')
+            cn = s.get('codec_name','?')
+            if ct == 'video':
+                print(f'Video    : {cn}  {s.get(\"width\")}x{s.get(\"height\")}')
+            elif ct == 'audio':
+                print(f'Audio    : {cn}  {s.get(\"channel_layout\",\"?\")}')
+        "
+        else
+          echo "Output file not found — encode likely failed." >> $GITHUB_STEP_SUMMARY
+        fi
+
+        # Show last 30 lines of encode log for context
+        echo "### Last 30 lines of encode log" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        tail -30 encode.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+    # ── 8. Upload encoded file ───────────────────────────────
+    - name: Upload encoded video
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: "${{ inputs.output_name }}"
+        path: "${{ inputs.output_name }}.mkv"
+        retention-days: 7
+        compression-level: 0       # video files are already compressed
+
+    # ── 9. Upload encode log (always, for debugging) ─────────
+    - name: Upload encode log
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: "${{ inputs.output_name }}-log"
+        path: encode.log
+        retention-days: 7
