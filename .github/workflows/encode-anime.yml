@@ -56,7 +56,7 @@ on:
           Synthetic grain strength (0 = off).
           8–12 suits most TV anime; raise to 20+ for grainy film-sourced anime.
         required: false
-        default: "6"
+        default: "0"
         type: string
 
       film_grain_denoise:
@@ -235,6 +235,27 @@ jobs:
           FILTER_FLAGS="$FILTER_FLAGS --comb-detect --decomb"
         fi
 
+        # ── Select only text-based subtitle tracks (ASS/SSA/SRT), drop PGS ──
+        TEXT_SUB_INDEXES=$(ffprobe -v quiet -print_format json -show_streams "$SOURCE_FILE" \
+          | python3 -c "
+import sys, json
+streams = json.load(sys.stdin)['streams']
+sub_streams = [s for s in streams if s.get('codec_type') == 'subtitle']
+text_codecs = {'ass', 'ssa', 'subrip', 'webvtt', 'mov_text'}
+hb_indexes = []
+for i, s in enumerate(sub_streams, start=1):
+    if s.get('codec_name','').lower() in text_codecs:
+        hb_indexes.append(str(i))
+print(','.join(hb_indexes))
+")
+
+        if [[ -n "$TEXT_SUB_INDEXES" ]]; then
+          SUB_FLAGS="--subtitle $TEXT_SUB_INDEXES"
+        else
+          SUB_FLAGS="--no-subtitle"
+        fi
+
+        echo "SUB_FLAGS=$SUB_FLAGS" >> $GITHUB_ENV
         echo "ENCODER_OPTS=$ENCODER_OPTS" >> $GITHUB_ENV
         echo "AUDIO_FLAGS=$AUDIO_FLAGS"   >> $GITHUB_ENV
         echo "FILTER_FLAGS=$FILTER_FLAGS" >> $GITHUB_ENV
@@ -271,10 +292,7 @@ jobs:
           \
           $AUDIO_FLAGS \
           $FILTER_FLAGS \
-          \
-          --subtitle-lang-list eng \
-          --subtitle scan,1,2,3,4 \
-          --subtitle-forced \
+          $SUB_FLAGS \
           --markers \
           \
           ${{ inputs.extra_flags }} \
