@@ -134,8 +134,8 @@ jobs:
       run: |
         sudo apt-get update -qq
         sudo apt-get install -y --no-install-recommends \
-          aria2 ffprobe \
-          libjansson4 libass9 libturbojpeg0 \
+          aria2 ffmpeg \
+          libjansson4 libass9 libturbojpeg0t64 \
           libvorbis0a libopus0 libmp3lame0 \
           libtheora0 libspeex1 libxml2 libvpx9 \
           libnuma1 libssl3 libdrm2 libva2 libva-drm2
