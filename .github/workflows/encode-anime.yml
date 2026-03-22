@@ -23,8 +23,9 @@ on:
       preset:
         description: |
           SVT-AV1 speed preset.
-          10 = fastest / lowest quality
-           0 = slowest / highest quality
+          10 = fastest / worst compression
+           4 = recommended balance for size targets
+           0 = slowest / best compression
           -1, -2, -3 = extra-slow (PSY fork only)
         required: false
         default: "4"
@@ -271,7 +272,9 @@ jobs:
           $AUDIO_FLAGS \
           $FILTER_FLAGS \
           \
-          --all-subtitles \
+          --subtitle-lang-list eng \
+          --subtitle scan,1,2,3,4 \
+          --subtitle-forced \
           --markers \
           \
           ${{ inputs.extra_flags }} \
