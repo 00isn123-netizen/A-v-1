@@ -266,7 +266,7 @@ jobs:
           --quality        "${{ inputs.crf }}" \
           --encoder-tune   "${{ inputs.tune }}" \
           --encoder-profile main \
-          --encoder-opt    "$ENCODER_OPTS" \
+          --encopts        "$ENCODER_OPTS" \
           \
           $AUDIO_FLAGS \
           $FILTER_FLAGS \
