@@ -86,9 +86,9 @@ on:
         default: "opus"
         type: choice
         options:
-          - "copy"           # passthrough all tracks unchanged
-          - "opus"           # re-encode to Opus 48k stereo
-          - "flac"           # lossless
+          - "copy"
+          - "opus"
+          - "flac"
 
       # ── Extra raw HandBrakeCLI flags (advanced) ────────────
       extra_flags:
