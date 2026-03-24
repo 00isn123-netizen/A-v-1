@@ -1,0 +1,104 @@
+name: Encode Anime Episode
+
+on:
+  workflow_dispatch:
+    inputs:
+      episode_url:
+        description: "Direct download URL for source (aria2c compatible)"
+        required: true
+      episode_name:
+        description: "Output filename (no extension)"
+        required: true
+        default: "episode"
+      crf:
+        description: "CRF value — lower = bigger/better (default 58)"
+        default: "58"
+      preset:
+        description: "SVT-AV1 preset 0–13 — lower = slower/better (default 4)"
+        default: "4"
+      native_height:
+        description: "Native resolution height for descale (720/810/864/900, or 0 to skip)"
+        default: "900"
+      denoise_h:
+        description: "KNLMeans denoise strength (0.8–2.5, higher = more aggressive)"
+        default: "1.4"
+
+jobs:
+  encode:
+    runs-on: ubuntu-latest        # 4 vCPU on public repo
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/anime-encoder:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+
+      # ── 1. Download source ────────────────────────────────────────────────
+      - name: Download source
+        run: |
+          mkdir -p /input /output
+          aria2c \
+            --file-allocation=none \
+            -x 16 -s 16 -k 1M \
+            "${{ github.event.inputs.episode_url }}" \
+            -o /input/source.mkv
+          echo "Source size: $(du -sh /input/source.mkv | cut -f1)"
+
+      # ── 2. Write VapourSynth filter script ───────────────────────────────
+      - name: Write filter script
+        run: |
+          # Patch settings from workflow inputs at runtime
+          sed \
+            -e 's|NATIVE_HEIGHT   = 900|NATIVE_HEIGHT   = ${{ github.event.inputs.native_height }}|' \
+            -e 's|DENOISE_H        = 1.4|DENOISE_H        = ${{ github.event.inputs.denoise_h }}|' \
+            /app/filter.vpy > /input/filter.vpy
+
+          # Disable descale if native_height is 0
+          if [ "${{ github.event.inputs.native_height }}" = "0" ]; then
+            sed -i 's/DESCALE         = True/DESCALE         = False/' /input/filter.vpy
+          fi
+
+      # ── 3. Encode ─────────────────────────────────────────────────────────
+      - name: Encode with av1an
+        run: |
+          INPUT=/input/source.mkv \
+          av1an \
+            -i /input/source.mkv \
+            --vfilter /input/filter.vpy \
+            -e svt-av1 \
+            --video-params "\
+              --crf ${{ github.event.inputs.crf }} \
+              --preset ${{ github.event.inputs.preset }} \
+              --tune 2 \
+              --film-grain 0 \
+              --film-grain-denoise 0 \
+              --enable-overlays 1 \
+              --scd 1 \
+              --keyint 240 \
+              --lp 4" \
+            -w 4 \
+            --pix-format yuv420p10le \
+            -a "-c:a libopus -b:a 64k -vbr on -compression_level 10" \
+            -s 60 \
+            --sc-method ffmpeg \
+            -o /output/${{ github.event.inputs.episode_name }}.mkv
+
+      # ── 4. Print stats ────────────────────────────────────────────────────
+      - name: Print encode stats
+        run: |
+          echo "──────────────────────────────────"
+          echo "Source:  $(du -sh /input/source.mkv  | cut -f1)"
+          echo "Output:  $(du -sh /output/${{ github.event.inputs.episode_name }}.mkv | cut -f1)"
+          echo "──────────────────────────────────"
+          mediainfo /output/${{ github.event.inputs.episode_name }}.mkv | \
+            grep -E "Duration|Bit rate|Format|Width|Height|Frame rate"
+
+      # ── 5. Upload ─────────────────────────────────────────────────────────
+      - name: Upload encoded episode
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.episode_name }}
+          path: /output/${{ github.event.inputs.episode_name }}.mkv
+          retention-days: 7
+          compression-level: 0   # already compressed, no point re-compressing
