@@ -1,6 +1,6 @@
 FROM archlinux:latest
 
-# 1. Base packages (includes vapoursynth, ffms2, compiler tools)
+# 1. Base packages (includes vapoursynth, ffms2, compiler tools, AND cmake)
 RUN pacman -Syu --noconfirm && \
     pacman -S --noconfirm gcc make wget pv git bash xz gawk \
     python python-pip mediainfo psmisc procps-ng supervisor \
@@ -8,7 +8,7 @@ RUN pacman -Syu --noconfirm && \
     findutils gdbm ncurses tar curl \
     aria2 base-devel tk \
     rust nasm clang vapoursynth \
-    autoconf automake libtool perl \
+    autoconf automake libtool perl cmake \
     aom ffms2 libvpx mkvtoolnix-cli vmaf meson ninja && \
     pacman -Scc --noconfirm
 
