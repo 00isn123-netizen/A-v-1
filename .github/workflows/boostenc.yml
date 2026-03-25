@@ -1,0 +1,264 @@
+name: Anime Encoder (SVT-AV1-Essential)
+
+on:
+  workflow_dispatch:
+    inputs:
+      episode_url:
+        description: "Direct URL to source .mkv file"
+        required: true
+        type: string
+      episode_name:
+        description: "Output filename (without extension, e.g. ep01)"
+        required: true
+        type: string
+      crf:
+        description: "CRF value (default: 32)"
+        required: false
+        default: "32"
+        type: string
+      auto_boost:
+        description: "Run Auto-Boost-Essential pre-pass?"
+        required: false
+        default: "true"
+        type: boolean
+
+jobs:
+  encode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # ── 2. Cache binaries ──────────────────────────────────────────────────
+      - name: Cache tools
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/tools
+          key: tools-svt-av1-essential-v1
+
+      # ── 3. Install system dependencies ────────────────────────────────────
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            mkvtoolnix \
+            python3 python3-pip \
+            wget curl unzip \
+            nasm yasm \
+            libva-dev libvdpau-dev \
+            vapoursynth python3-vapoursynth || true
+
+      # ── 4. Install FFmpeg (SVT-AV1-Essential build) ───────────────────────
+      - name: Install FFmpeg-SVT-AV1-Essential
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/tools
+          echo "Fetching latest FFmpeg-SVT-AV1-Essential release..."
+          RELEASE_URL=$(curl -s https://api.github.com/repos/nekotrix/FFmpeg-Builds-SVT-AV1-Essential/releases/latest \
+            | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assets = data.get('assets', [])
+          for a in assets:
+              name = a['name']
+              if 'linux64' in name and 'gpl' in name and 'shared' not in name and name.endswith('.tar.xz'):
+                  print(a['browser_download_url'])
+                  break
+          ")
+          echo "Downloading: $RELEASE_URL"
+          wget -q "$RELEASE_URL" -O /tmp/ffmpeg.tar.xz
+          tar -xf /tmp/ffmpeg.tar.xz -C ~/tools --strip-components=1
+          echo "FFmpeg version:"
+          ~/tools/bin/ffmpeg -version | head -3
+
+      - name: Add FFmpeg to PATH
+        run: echo "$HOME/tools/bin" >> $GITHUB_PATH
+
+      # ── 5. Install Av1an ──────────────────────────────────────────────────
+      - name: Install Av1an
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          echo "Fetching latest Av1an release..."
+          AV1AN_URL=$(curl -s https://api.github.com/repos/master-of-zen/Av1an/releases/latest \
+            | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for a in data.get('assets', []):
+              if 'linux' in a['name'].lower() and not a['name'].endswith('.sha256'):
+                  print(a['browser_download_url'])
+                  break
+          ")
+          echo "Downloading Av1an: $AV1AN_URL"
+          wget -q "$AV1AN_URL" -O ~/tools/bin/av1an
+          chmod +x ~/tools/bin/av1an
+          av1an --version
+
+      # ── 6. Install SVT-AV1-Essential ──────────────────────────────────────
+      - name: Install SVT-AV1-Essential
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          echo "Fetching latest SVT-AV1-Essential release..."
+          SVT_URL=$(curl -s https://api.github.com/repos/nekotrix/SVT-AV1-Essential/releases/latest \
+            | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for a in data.get('assets', []):
+              name = a['name'].lower()
+              if 'linux' in name and 'x86_64' in name and name.endswith('.tar.gz'):
+                  print(a['browser_download_url'])
+                  break
+          ")
+          if [ -z "$SVT_URL" ]; then
+            echo "No prebuilt binary found, building from source..."
+            sudo apt-get install -y cmake clang
+            git clone --depth=1 https://github.com/nekotrix/SVT-AV1-Essential /tmp/svt-av1-essential
+            cd /tmp/svt-av1-essential/Build/linux
+            ./build.sh --native --static --release
+            cp /tmp/svt-av1-essential/Bin/Release/SvtAv1EncApp ~/tools/bin/
+          else
+            echo "Downloading: $SVT_URL"
+            wget -q "$SVT_URL" -O /tmp/svt.tar.gz
+            tar -xf /tmp/svt.tar.gz -C ~/tools/bin/ --wildcards '*/SvtAv1EncApp' --strip-components=1 || \
+            tar -xf /tmp/svt.tar.gz -C /tmp/svt-extract/
+            find /tmp/svt-extract -name 'SvtAv1EncApp' -exec cp {} ~/tools/bin/ \; 2>/dev/null || true
+          fi
+          chmod +x ~/tools/bin/SvtAv1EncApp
+          SvtAv1EncApp --version
+
+      # ── 7. Install VapourSynth + plugins (for Auto-Boost) ─────────────────
+      - name: Install VapourSynth plugins
+        run: |
+          pip3 install -q vapoursynth 2>/dev/null || true
+          # LSMASHSource
+          pip3 install -q lsmash 2>/dev/null || true
+          # vszip (replaces vapoursynth-ssimulacra2)
+          pip3 install -q vszip 2>/dev/null || true
+          # Other Auto-Boost deps
+          pip3 install -q numpy tqdm rich 2>/dev/null || true
+
+      # ── 8. Install Auto-Boost-Essential ───────────────────────────────────
+      - name: Install Auto-Boost-Essential
+        run: |
+          git clone --depth=1 https://github.com/nekotrix/auto-boost-algorithm /tmp/auto-boost
+          cp -r /tmp/auto-boost/Auto-Boost-Essential ~/tools/Auto-Boost-Essential
+
+      # ── 9. Download source file ───────────────────────────────────────────
+      - name: Download source episode
+        run: |
+          mkdir -p ~/encode
+          echo "Downloading source: ${{ inputs.episode_url }}"
+          wget -q --show-progress "${{ inputs.episode_url }}" -O ~/encode/source.mkv
+          echo "Source info:"
+          ffprobe -v quiet -show_entries \
+            format=duration,size:stream=codec_type,codec_name,width,height \
+            -of default ~/encode/source.mkv
+
+      # ── 10. Extract subtitles from source ────────────────────────────────
+      - name: Extract subtitles
+        run: |
+          mkdir -p ~/encode/subs
+          # Extract all subtitle tracks
+          ffmpeg -i ~/encode/source.mkv \
+            -map 0:s? \
+            -c:s copy \
+            ~/encode/subs/subs.mks 2>/dev/null || echo "No subtitles found or extraction skipped"
+
+      # ── 11. Encode video ──────────────────────────────────────────────────
+      - name: Encode with Auto-Boost-Essential
+        if: ${{ inputs.auto_boost == 'true' }}
+        run: |
+          cd ~/tools/Auto-Boost-Essential
+          python3 Auto-Boost-Essential.py \
+            ~/encode/source.mkv \
+            --crf ${{ inputs.crf }} \
+            --preset 5 \
+            --preset-fast 8 \
+            --output ~/encode/video.mkv \
+            --workers 4 \
+            --encoder svt-av1 \
+            --extra-params "--enable-variance-boost 1 \
+              --variance-boost-strength 2 \
+              --variance-octile 4 \
+              --luminance-qp-bias 15 \
+              --qp-scale-compress-strength 2 \
+              --enable-dlf 2 \
+              --enable-qm 1 --qm-min 0 \
+              --sharpness 1 \
+              --tf-strength 1 \
+              --scd 1 --keyint -1"
+
+      - name: Encode without Auto-Boost (direct av1an)
+        if: ${{ inputs.auto_boost == 'false' }}
+        run: |
+          av1an \
+            -i ~/encode/source.mkv \
+            -o ~/encode/video.mkv \
+            --encoder svt-av1 \
+            --workers 4 \
+            --split-method av-scenechange \
+            --chunk-method lsmash \
+            --concat mkvmerge \
+            --pix-fmt yuv420p10le \
+            --video-params "--crf ${{ inputs.crf }} \
+              --preset 5 \
+              --enable-variance-boost 1 \
+              --variance-boost-strength 2 \
+              --variance-octile 4 \
+              --luminance-qp-bias 15 \
+              --qp-scale-compress-strength 2 \
+              --enable-dlf 2 \
+              --enable-qm 1 --qm-min 0 \
+              --sharpness 1 \
+              --tf-strength 1 \
+              --scd 1 --keyint -1"
+
+      # ── 12. Encode audio ──────────────────────────────────────────────────
+      - name: Encode audio
+        run: |
+          ffmpeg -i ~/encode/source.mkv \
+            -map 0:a \
+            -c:a libopus \
+            -b:a 128k \
+            -vn \
+            ~/encode/audio.mka
+          echo "Audio encoded."
+
+      # ── 13. Mux video + audio + subtitles ────────────────────────────────
+      - name: Mux final output
+        run: |
+          SUBS_ARG=""
+          if [ -f ~/encode/subs/subs.mks ]; then
+            SUBS_ARG="--no-video --no-audio ~/encode/subs/subs.mks"
+          fi
+
+          mkvmerge \
+            -o ~/encode/${{ inputs.episode_name }}.mkv \
+            --no-audio ~/encode/video.mkv \
+            --no-video ~/encode/audio.mka \
+            $SUBS_ARG
+
+          echo "Final file size:"
+          du -sh ~/encode/${{ inputs.episode_name }}.mkv
+
+      # ── 14. Print encode stats ────────────────────────────────────────────
+      - name: Encode summary
+        run: |
+          echo "===== ENCODE SUMMARY ====="
+          ffprobe -v quiet \
+            -show_entries format=duration,size,bit_rate \
+            -of default \
+            ~/encode/${{ inputs.episode_name }}.mkv
+          echo "=========================="
+
+      # ── 15. Upload artifact ───────────────────────────────────────────────
+      - name: Upload encoded episode
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.episode_name }}
+          path: ~/encode/${{ inputs.episode_name }}.mkv
+          retention-days: 7
