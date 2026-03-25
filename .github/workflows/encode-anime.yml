@@ -29,16 +29,15 @@ on:
         type: string
 
       tune:
-        description: "Perceptual tune"
+        description: "Perceptual tune (0=vq, 1=psnr, 2=ssim, 3=still picture)"
         required: false
-        default: "subjective ssim"
+        default: "2"
         type: choice
         options:
-          - "subjective ssim"
-          - "still picture"
-          - "vq"
-          - "psnr"
-          - "ssim"
+          - "2"   # subjective ssim (recommended for anime)
+          - "3"   # still picture
+          - "0"   # vq
+          - "1"   # psnr
 
       film_grain:
         description: "Film grain synthesis (0 = off)"
@@ -53,20 +52,14 @@ on:
         type: choice
         options: ["0","1"]
 
-      detelecine:
-        description: "Detelecine (for interlaced NTSC rips)"
+      workers:
+        description: "av1an parallel workers (scenes encoded simultaneously)"
         required: false
-        default: "false"
-        type: boolean
-
-      decomb:
-        description: "Decomb (for interlaced sources)"
-        required: false
-        default: "false"
-        type: boolean
+        default: "4"
+        type: string
 
       audio_mode:
-        description: "Audio handling"
+        description: "Audio handling (ffmpeg pass-through after av1an)"
         required: false
         default: "opus"
         type: choice
@@ -75,12 +68,6 @@ on:
           - "opus"
           - "flac"
 
-      extra_flags:
-        description: "Extra HandBrakeCLI flags (appended verbatim)"
-        required: false
-        default: ""
-        type: string
-
 
 jobs:
   encode:
@@ -88,11 +75,49 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/anime-encoder:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
     steps:
 
-    - name: Write helper scripts
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install aria2 for downloading
+      run: pacman -S --noconfirm aria2
+
+    - name: Download source video
       run: |
-        cat > /tmp/probe.py << 'EOF'
+        aria2c \
+          --out="source" \
+          --split=8 \
+          --max-connection-per-server=8 \
+          --min-split-size=5M \
+          --allow-overwrite=true \
+          "${{ inputs.video_url }}"
+
+        EXT=$(file -b --extension source | cut -d'/' -f1)
+        case "$EXT" in
+          mkv|mk*) EXT="mkv" ;;
+          mp4|m4v*) EXT="mp4" ;;
+          avi)     EXT="avi" ;;
+          ts|mpeg*) EXT="ts" ;;
+          *)       EXT="mkv" ;;
+        esac
+
+        mv source "source.$EXT"
+        echo "SOURCE_FILE=source.$EXT" >> $GITHUB_ENV
+        ls -lh "source.$EXT"
+
+    - name: Probe source metadata
+      run: |
+        echo "### Source File Info" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        ffprobe -v quiet -print_format json -show_format -show_streams "$SOURCE_FILE" | \
+          python3 -c "
         import sys, json
         d = json.load(sys.stdin)
         fmt = d.get('format', {})
@@ -108,145 +133,97 @@ jobs:
                 print('Audio     : ' + cn + '  ' + s.get('channel_layout', '?') + '  ' + str(int(s.get('bit_rate', 0)) // 1000) + 'k')
             elif ct == 'subtitle':
                 print('Subtitle  : ' + cn + '  (' + s.get('tags', {}).get('language', '?') + ')')
-        EOF
+        " >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
 
-        cat > /tmp/get_text_subs.py << 'EOF'
+    - name: Extract subtitles
+      run: |
+        # Extract all text-based subtitle tracks to pass through after encode
+        SUB_FILE=""
+        TEXT_CODECS="ass|ssa|subrip|webvtt|mov_text"
+        STREAMS=$(ffprobe -v quiet -print_format json -show_streams "$SOURCE_FILE")
+        SUB_COUNT=$(echo "$STREAMS" | python3 -c "
         import sys, json
-        data = json.load(sys.stdin)
-        subs = [s for s in data['streams'] if s.get('codec_type') == 'subtitle']
-        text = {'ass', 'ssa', 'subrip', 'webvtt', 'mov_text'}
-        indexes = [str(i) for i, s in enumerate(subs, 1) if s.get('codec_name', '').lower() in text]
-        print(','.join(indexes))
-        EOF
+        d = json.load(sys.stdin)
+        text = {'ass','ssa','subrip','webvtt','mov_text'}
+        subs = [s for s in d['streams'] if s.get('codec_type')=='subtitle' and s.get('codec_name','').lower() in text]
+        print(len(subs))
+        ")
 
-        sed -i 's/^        //' /tmp/probe.py
-        sed -i 's/^        //' /tmp/get_text_subs.py
-
-    - name: Download HandBrakeCLI (SVT-AV1-PSY build)
-      run: |
-        ASSET_URL=$(curl -fsSL \
-          -H "Accept: application/vnd.github+json" \
-          "https://api.github.com/repos/Uranite/HandBrake-5fish-SVT-AV1-PSY/releases/tags/ubuntu" \
-          | jq -r '.assets[] | select(.name | test("HandBrakeCLI")) | .browser_download_url' \
-          | head -1)
-
-        if [[ -z "$ASSET_URL" ]]; then
-          echo "ERROR: Could not locate HandBrakeCLI asset." >&2
-          exit 1
-        fi
-
-        curl -fsSL "$ASSET_URL" -o HandBrakeCLI
-        chmod +x HandBrakeCLI
-        ./HandBrakeCLI --version 2>&1 | head -5
-
-    - name: Install runtime libs and tools
-      run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends \
-          aria2 ffmpeg \
-          libjansson4 libass9 libturbojpeg \
-          libvorbis0a libopus0 libmp3lame0 \
-          libtheora0 libspeex1 libxml2 libvpx9 \
-          libnuma1 libssl3 libdrm2 libva2 libva-drm2
-
-    - name: Download source video
-      run: |
-        aria2c \
-          --out="input" \
-          --split=8 \
-          --max-connection-per-server=8 \
-          --min-split-size=5M \
-          --allow-overwrite=true \
-          "${{ inputs.video_url }}"
-
-        EXT=$(file -b --extension input | cut -d'/' -f1)
-        case "$EXT" in
-          mkv|mk*) EXT="mkv" ;;
-          mp4|m4v*) EXT="mp4" ;;
-          avi) EXT="avi" ;;
-          ts|mpeg*) EXT="ts" ;;
-          *) EXT="mkv" ;;
-        esac
-
-        mv input "input.$EXT"
-        echo "SOURCE_FILE=input.$EXT" >> $GITHUB_ENV
-        ls -lh "input.$EXT"
-
-    - name: Probe source metadata
-      run: |
-        echo "### Source File Info" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        ffprobe -v quiet -print_format json -show_format -show_streams "$SOURCE_FILE" \
-          | python3 /tmp/probe.py >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-
-    - name: Build encoder flags
-      run: |
-        echo "OUTPUT_FILE=${{ inputs.output_name }}.mkv" >> $GITHUB_ENV
-
-        ENCODER_OPTS="film-grain=${{ inputs.film_grain }}:film-grain-denoise=${{ inputs.film_grain_denoise }}:enable-overlays=1:scd=1"
-
-        case "${{ inputs.audio_mode }}" in
-          copy) AUDIO_FLAGS="--aencoder copy" ;;
-          opus) AUDIO_FLAGS="--aencoder opus --ab 48 --mixdown stereo" ;;
-          flac) AUDIO_FLAGS="--aencoder flac24" ;;
-        esac
-
-        FILTER_FLAGS=""
-        if [[ "${{ inputs.detelecine }}" == "true" ]]; then
-          FILTER_FLAGS="$FILTER_FLAGS --detelecine"
-        fi
-        if [[ "${{ inputs.decomb }}" == "true" ]]; then
-          FILTER_FLAGS="$FILTER_FLAGS --comb-detect --decomb"
-        fi
-
-        TEXT_SUB_INDEXES=$(ffprobe -v quiet -print_format json -show_streams "$SOURCE_FILE" \
-          | python3 /tmp/get_text_subs.py)
-
-        if [[ -n "$TEXT_SUB_INDEXES" ]]; then
-          SUB_FLAGS="--subtitle $TEXT_SUB_INDEXES"
+        if [[ "$SUB_COUNT" -gt 0 ]]; then
+          ffmpeg -i "$SOURCE_FILE" -map 0:s -c:s copy subs.mkv 2>/dev/null || true
+          if [[ -f subs.mkv ]]; then
+            echo "SUB_FILE=subs.mkv" >> $GITHUB_ENV
+            echo "Found $SUB_COUNT subtitle track(s), extracted to subs.mkv"
+          fi
         else
-          SUB_FLAGS="--no-subtitle"
+          echo "No text subtitle tracks found."
         fi
 
-        echo "ENCODER_OPTS=$ENCODER_OPTS" >> $GITHUB_ENV
-        echo "AUDIO_FLAGS=$AUDIO_FLAGS"   >> $GITHUB_ENV
-        echo "FILTER_FLAGS=$FILTER_FLAGS" >> $GITHUB_ENV
-        echo "SUB_FLAGS=$SUB_FLAGS"       >> $GITHUB_ENV
-
-        echo "### Encode Settings"                                                                     >> $GITHUB_STEP_SUMMARY
-        echo "| Setting | Value |"                                                                     >> $GITHUB_STEP_SUMMARY
-        echo "| --- | --- |"                                                                           >> $GITHUB_STEP_SUMMARY
-        echo "| Encoder | SVT-AV1 (5fish-PSY) |"                                                      >> $GITHUB_STEP_SUMMARY
-        echo "| Preset | ${{ inputs.preset }} |"                                                       >> $GITHUB_STEP_SUMMARY
-        echo "| CRF | ${{ inputs.crf }} |"                                                             >> $GITHUB_STEP_SUMMARY
-        echo "| Tune | ${{ inputs.tune }} |"                                                           >> $GITHUB_STEP_SUMMARY
-        echo "| Film grain | ${{ inputs.film_grain }} (denoise=${{ inputs.film_grain_denoise }}) |"   >> $GITHUB_STEP_SUMMARY
-        echo "| Audio | ${{ inputs.audio_mode }} 48kbps stereo |"                                     >> $GITHUB_STEP_SUMMARY
-        echo "| Text subs selected | ${TEXT_SUB_INDEXES:-none} |"                                     >> $GITHUB_STEP_SUMMARY
-
-    - name: Encode with HandBrakeCLI
+    - name: Encode with av1an + VapourSynth (filter.vpy)
       run: |
-        ./HandBrakeCLI \
-          --input  "$SOURCE_FILE" \
-          --output "$OUTPUT_FILE" \
-          --encoder        svt_av1 \
-          --encoder-preset "${{ inputs.preset }}" \
-          --quality        "${{ inputs.crf }}" \
-          --encoder-tune   "${{ inputs.tune }}" \
-          --encoder-profile main \
-          --encopts        "$ENCODER_OPTS" \
-          $AUDIO_FLAGS \
-          $FILTER_FLAGS \
-          $SUB_FLAGS \
-          --markers \
-          ${{ inputs.extra_flags }} \
+        ENCOPTS="--crf ${{ inputs.crf }} \
+          --preset ${{ inputs.preset }} \
+          --tune ${{ inputs.tune }} \
+          --film-grain ${{ inputs.film_grain }} \
+          --film-grain-denoise ${{ inputs.film_grain_denoise }} \
+          --enable-overlays 1 \
+          --scd 1"
+
+        # Pass source path to filter.vpy via environment variable
+        export INPUT="$(pwd)/$SOURCE_FILE"
+
+        av1an \
+          -i filter.vpy \
+          --encoder svt-av1 \
+          --video-params "$ENCOPTS" \
+          --pix-format yuv420p10le \
+          --workers ${{ inputs.workers }} \
+          --scenes scenes.json \
+          --sc-method standard \
+          --concat mkvmerge \
+          -o video_only.mkv \
           2>&1 | tee encode.log
 
         EXIT_CODE=${PIPESTATUS[0]}
         if [[ $EXIT_CODE -ne 0 ]]; then
-          echo "::error::HandBrakeCLI exited with code $EXIT_CODE"
+          echo "::error::av1an exited with code $EXIT_CODE"
           exit $EXIT_CODE
+        fi
+
+    - name: Mux audio and subtitles
+      run: |
+        OUTPUT_FILE="${{ inputs.output_name }}.mkv"
+        echo "OUTPUT_FILE=$OUTPUT_FILE" >> $GITHUB_ENV
+
+        case "${{ inputs.audio_mode }}" in
+          copy)
+            AUDIO_FLAGS="-c:a copy"
+            ;;
+          opus)
+            AUDIO_FLAGS="-c:a libopus -b:a 48k -ac 2"
+            ;;
+          flac)
+            AUDIO_FLAGS="-c:a flac"
+            ;;
+        esac
+
+        if [[ -n "$SUB_FILE" ]]; then
+          ffmpeg -i video_only.mkv -i "$SOURCE_FILE" -i "$SUB_FILE" \
+            -map 0:v \
+            -map 1:a \
+            -map 2:s \
+            $AUDIO_FLAGS \
+            -c:s copy \
+            -c:v copy \
+            "$OUTPUT_FILE"
+        else
+          ffmpeg -i video_only.mkv -i "$SOURCE_FILE" \
+            -map 0:v \
+            -map 1:a \
+            $AUDIO_FLAGS \
+            -c:v copy \
+            "$OUTPUT_FILE"
         fi
 
     - name: Encode report
@@ -263,7 +240,7 @@ jobs:
           echo "| Output | $(numfmt --to=iec $OUT_SIZE)B |"            >> $GITHUB_STEP_SUMMARY
           echo "| Ratio  | $RATIO of source |"                         >> $GITHUB_STEP_SUMMARY
         else
-          echo "Output file not found - encode likely failed."         >> $GITHUB_STEP_SUMMARY
+          echo "Output file not found — encode likely failed."          >> $GITHUB_STEP_SUMMARY
         fi
         echo "### Last 30 lines of encode log" >> $GITHUB_STEP_SUMMARY
         echo '```'                             >> $GITHUB_STEP_SUMMARY
@@ -286,3 +263,4 @@ jobs:
         name: "${{ inputs.output_name }}-log"
         path: encode.log
         retention-days: 7
+        
