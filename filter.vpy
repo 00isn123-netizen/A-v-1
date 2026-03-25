@@ -216,29 +216,32 @@ except Exception as e:
     degrained = clip_denoise
 
 # --- KNLMeansCL spatial pass ---
-# Works on 16-bit float intermediary; h controls aggressiveness
+# Convert to 32-bit float for KNLMeans (higher precision, avoids integer rounding artifacts)
 try:
-    clip_float = core.resize.Bicubic(degrained, format=vs.YUVssP16)  # try float path
-except Exception:
+    clip_float = core.resize.Bicubic(degrained, format=vs.YUV420PS)
+except Exception as e:
+    print(f"[filter.vpy] Float conversion failed ({e}), using 16-bit for KNLMeans.", file=sys.stderr)
     clip_float = degrained
 
 try:
-    denoised = core.knlm.KNLMeansCL(
-        degrained,
+    denoised_float = core.knlm.KNLMeansCL(
+        clip_float,
         h=DENOISE_H,
         a=2,                    # search window radius
         d=DENOISE_TEMPORAL,     # temporal radius
         channels="Y",           # luma only first
         device_type="cpu",
     )
-    denoised = core.knlm.KNLMeansCL(
-        denoised,
+    denoised_float = core.knlm.KNLMeansCL(
+        denoised_float,
         h=DENOISE_H_CHROMA,
         a=2,
         d=1,
         channels="UV",          # then chroma
         device_type="cpu",
     )
+    # Convert back to 16-bit for downstream steps
+    denoised = core.resize.Bicubic(denoised_float, format=vs.YUV420P16)
 except Exception as e:
     print(f"[filter.vpy] KNLMeans failed ({e}), using MVTools result only.", file=sys.stderr)
     denoised = degrained
