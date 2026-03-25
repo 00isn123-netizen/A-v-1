@@ -1,0 +1,111 @@
+name: Build Encoder Docker Image
+
+on:
+  push:
+    branches: ["main", "master"]
+    paths:
+      - "Dockerfile"
+      - ".github/workflows/build-encoder.yml"
+  pull_request:
+    branches: ["main", "master"]
+    paths:
+      - "Dockerfile"
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force full rebuild (ignore cache)"
+        required: false
+        default: "false"
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Free up disk space — the Rust + pyenv builds are huge
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo docker image prune -af
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      # ── Layer 1: base system packages (pacman -S ...) ──────────────────────
+      # This layer almost never changes, so it gets its own cache scope.
+      - name: Build & cache — base-packages layer
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          target: base-packages   # see Dockerfile.staged note below
+          cache-from: |
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-base-packages
+          cache-to: |
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-base-packages,mode=max
+          load: false
+
+      # ── Full image build with all caches wired up ─────────────────────────
+      - name: Build and push full image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Pull cache from:
+          #   1. The dedicated per-layer cache tags (base-packages, svt, pyenv, av1an)
+          #   2. The latest image itself (good fallback for unchanged layers)
+          cache-from: |
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-base-packages
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-svt-av1
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-pyenv
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-av1an
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          # Write back fine-grained per-layer caches
+          cache-to: |
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-svt-av1,mode=max
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-pyenv,mode=max
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-av1an,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            ${{ inputs.force_rebuild == 'true' && 'CACHE_BUST=' || '' }}${{ inputs.force_rebuild == 'true' && github.run_id || '' }}
+
+      # ── Print final image digest for traceability ─────────────────────────
+      - name: Image digest
+        run: echo "${{ steps.meta.outputs.tags }}"
