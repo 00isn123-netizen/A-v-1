@@ -1,80 +1,31 @@
-name: Encode Anime
+name: Encode Anime Episode
 
 on:
   workflow_dispatch:
     inputs:
-
-      video_url:
-        description: "Direct URL to source video (mkv/mp4/etc.)"
+      episode_url:
+        description: "Direct download URL for source (aria2c compatible)"
         required: true
-        type: string
-
-      output_name:
+      episode_name:
         description: "Output filename (no extension)"
-        required: false
-        default: "encoded_anime"
-        type: string
-
-      preset:
-        description: "SVT-AV1 preset (4=recommended, 0=slowest/best, -1/-2/-3=PSY extra-slow)"
-        required: false
-        default: "4"
-        type: choice
-        options: ["10","9","8","7","6","5","4","3","2","1","0","-1","-2","-3"]
-
+        required: true
+        default: "episode"
       crf:
-        description: "CRF quality (38-42 for small encode; lower = better/bigger)"
-        required: false
-        default: "38"
-        type: string
-
-      tune:
-        description: "Perceptual tune (0=vq, 1=psnr, 2=ssim, 3=still picture)"
-        required: false
-        default: "2"
-        type: choice
-        options:
-          - "2"   # subjective ssim (recommended for anime)
-          - "3"   # still picture
-          - "0"   # vq
-          - "1"   # psnr
-
-      film_grain:
-        description: "Film grain synthesis (0 = off)"
-        required: false
-        default: "0"
-        type: string
-
-      film_grain_denoise:
-        description: "Denoise before adding grain (1=yes, 0=no)"
-        required: false
-        default: "0"
-        type: choice
-        options: ["0","1"]
-
-      workers:
-        description: "av1an parallel workers (scenes encoded simultaneously)"
-        required: false
+        description: "CRF value — lower = bigger/better (default 58)"
+        default: "58"
+      preset:
+        description: "SVT-AV1 preset 0–13 — lower = slower/better (default 4)"
         default: "4"
-        type: string
-
-      audio_mode:
-        description: "Audio handling (ffmpeg pass-through after av1an)"
-        required: false
-        default: "opus"
-        type: choice
-        options:
-          - "copy"
-          - "opus"
-          - "flac"
-
+      native_height:
+        description: "Native resolution height for descale (720/810/864/900, or 0 to skip)"
+        default: "900"
+      denoise_h:
+        description: "KNLMeans denoise strength (0.8–2.5, higher = more aggressive)"
+        default: "1.4"
 
 jobs:
   encode:
-    name: "Encode -> ${{ inputs.output_name }}.mkv"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/${{ github.repository_owner }}/anime-encoder:latest
       credentials:
@@ -83,184 +34,72 @@ jobs:
 
     steps:
 
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      # ── 1. Checkout (gives us filter.vpy from the repo) ───────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Install aria2 for downloading
-      run: pacman -S --noconfirm aria2
+      # ── 2. Download source ────────────────────────────────────────────────
+      - name: Download source
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/input" "$GITHUB_WORKSPACE/output"
+          aria2c \
+            --file-allocation=none \
+            -x 16 -s 16 -k 1M \
+            "${{ github.event.inputs.episode_url }}" \
+            -o "$GITHUB_WORKSPACE/input/source.mkv"
+          echo "Source size: $(du -sh "$GITHUB_WORKSPACE/input/source.mkv" | cut -f1)"
 
-    - name: Download source video
-      run: |
-        aria2c \
-          --out="source" \
-          --split=8 \
-          --max-connection-per-server=8 \
-          --min-split-size=5M \
-          --allow-overwrite=true \
-          "${{ inputs.video_url }}"
-
-        EXT=$(file -b --extension source | cut -d'/' -f1)
-        case "$EXT" in
-          mkv|mk*) EXT="mkv" ;;
-          mp4|m4v*) EXT="mp4" ;;
-          avi)     EXT="avi" ;;
-          ts|mpeg*) EXT="ts" ;;
-          *)       EXT="mkv" ;;
-        esac
-
-        mv source "source.$EXT"
-        echo "SOURCE_FILE=source.$EXT" >> $GITHUB_ENV
-        ls -lh "source.$EXT"
-
-    - name: Probe source metadata
-      run: |
-        echo "### Source File Info" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        ffprobe -v quiet -print_format json -show_format -show_streams "$SOURCE_FILE" | \
-          python3 -c "
-        import sys, json
-        d = json.load(sys.stdin)
-        fmt = d.get('format', {})
-        print('Container : ' + fmt.get('format_long_name', '?'))
-        print('Duration  : ' + str(round(float(fmt.get('duration', 0)) / 60, 1)) + ' min')
-        print('File size : ' + str(round(int(fmt.get('size', 0)) / 1024 / 1024, 1)) + ' MB')
-        for s in d.get('streams', []):
-            ct = s.get('codec_type', '?')
-            cn = s.get('codec_name', '?')
-            if ct == 'video':
-                print('Video     : ' + cn + '  ' + str(s.get('width')) + 'x' + str(s.get('height')) + '  ' + s.get('r_frame_rate', '?') + ' fps')
-            elif ct == 'audio':
-                print('Audio     : ' + cn + '  ' + s.get('channel_layout', '?') + '  ' + str(int(s.get('bit_rate', 0)) // 1000) + 'k')
-            elif ct == 'subtitle':
-                print('Subtitle  : ' + cn + '  (' + s.get('tags', {}).get('language', '?') + ')')
-        " >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-
-    - name: Extract subtitles
-      run: |
-        # Extract all text-based subtitle tracks to pass through after encode
-        SUB_FILE=""
-        TEXT_CODECS="ass|ssa|subrip|webvtt|mov_text"
-        STREAMS=$(ffprobe -v quiet -print_format json -show_streams "$SOURCE_FILE")
-        SUB_COUNT=$(echo "$STREAMS" | python3 -c "
-        import sys, json
-        d = json.load(sys.stdin)
-        text = {'ass','ssa','subrip','webvtt','mov_text'}
-        subs = [s for s in d['streams'] if s.get('codec_type')=='subtitle' and s.get('codec_name','').lower() in text]
-        print(len(subs))
-        ")
-
-        if [[ "$SUB_COUNT" -gt 0 ]]; then
-          ffmpeg -i "$SOURCE_FILE" -map 0:s -c:s copy subs.mkv 2>/dev/null || true
-          if [[ -f subs.mkv ]]; then
-            echo "SUB_FILE=subs.mkv" >> $GITHUB_ENV
-            echo "Found $SUB_COUNT subtitle track(s), extracted to subs.mkv"
+      # ── 3. Write VapourSynth filter script ───────────────────────────────
+      - name: Write filter script
+        run: |
+          sed \
+            -e 's|NATIVE_HEIGHT   = 900|NATIVE_HEIGHT   = ${{ github.event.inputs.native_height }}|' \
+            -e 's|DENOISE_H        = 1.4|DENOISE_H        = ${{ github.event.inputs.denoise_h }}|' \
+            "$GITHUB_WORKSPACE/filter.vpy" > "$GITHUB_WORKSPACE/input/filter.vpy"
+          if [ "${{ github.event.inputs.native_height }}" = "0" ]; then
+            sed -i 's/DESCALE         = True/DESCALE         = False/' "$GITHUB_WORKSPACE/input/filter.vpy"
           fi
-        else
-          echo "No text subtitle tracks found."
-        fi
 
-    - name: Encode with av1an + VapourSynth (filter.vpy)
-      run: |
-        ENCOPTS="--crf ${{ inputs.crf }} \
-          --preset ${{ inputs.preset }} \
-          --tune ${{ inputs.tune }} \
-          --film-grain ${{ inputs.film_grain }} \
-          --film-grain-denoise ${{ inputs.film_grain_denoise }} \
-          --enable-overlays 1 \
-          --scd 1"
+      # ── 4. Encode ─────────────────────────────────────────────────────────
+      - name: Encode with av1an
+        run: |
+          INPUT="$GITHUB_WORKSPACE/input/source.mkv" \
+          av1an \
+            -i "$GITHUB_WORKSPACE/input/filter.vpy" \
+            -e svt-av1 \
+            --video-params "\
+              --crf ${{ github.event.inputs.crf }} \
+              --preset ${{ github.event.inputs.preset }} \
+              --tune 2 \
+              --film-grain 0 \
+              --film-grain-denoise 0 \
+              --enable-overlays 1 \
+              --scd 1 \
+              --keyint 240 \
+              --lp 4" \
+            -w 4 \
+            --pix-format yuv420p10le \
+            -a "-c:a libopus -b:a 64k -vbr on -compression_level 10" \
+            -s 60 \
+            --sc-method ffmpeg \
+            -o "$GITHUB_WORKSPACE/output/${{ github.event.inputs.episode_name }}.mkv"
 
-        # Pass source path to filter.vpy via environment variable
-        export INPUT="$(pwd)/$SOURCE_FILE"
+      # ── 5. Print stats ────────────────────────────────────────────────────
+      - name: Print encode stats
+        run: |
+          echo "──────────────────────────────────"
+          echo "Source:  $(du -sh "$GITHUB_WORKSPACE/input/source.mkv" | cut -f1)"
+          echo "Output:  $(du -sh "$GITHUB_WORKSPACE/output/${{ github.event.inputs.episode_name }}.mkv" | cut -f1)"
+          echo "──────────────────────────────────"
+          mediainfo "$GITHUB_WORKSPACE/output/${{ github.event.inputs.episode_name }}.mkv" | \
+            grep -E "Duration|Bit rate|Format|Width|Height|Frame rate"
 
-        av1an \
-          -i filter.vpy \
-          --encoder svt-av1 \
-          --video-params "$ENCOPTS" \
-          --pix-format yuv420p10le \
-          --workers ${{ inputs.workers }} \
-          --scenes scenes.json \
-          --sc-method standard \
-          --concat mkvmerge \
-          -o video_only.mkv \
-          2>&1 | tee encode.log
-
-        EXIT_CODE=${PIPESTATUS[0]}
-        if [[ $EXIT_CODE -ne 0 ]]; then
-          echo "::error::av1an exited with code $EXIT_CODE"
-          exit $EXIT_CODE
-        fi
-
-    - name: Mux audio and subtitles
-      run: |
-        OUTPUT_FILE="${{ inputs.output_name }}.mkv"
-        echo "OUTPUT_FILE=$OUTPUT_FILE" >> $GITHUB_ENV
-
-        case "${{ inputs.audio_mode }}" in
-          copy)
-            AUDIO_FLAGS="-c:a copy"
-            ;;
-          opus)
-            AUDIO_FLAGS="-c:a libopus -b:a 48k -ac 2"
-            ;;
-          flac)
-            AUDIO_FLAGS="-c:a flac"
-            ;;
-        esac
-
-        if [[ -n "$SUB_FILE" ]]; then
-          ffmpeg -i video_only.mkv -i "$SOURCE_FILE" -i "$SUB_FILE" \
-            -map 0:v \
-            -map 1:a \
-            -map 2:s \
-            $AUDIO_FLAGS \
-            -c:s copy \
-            -c:v copy \
-            "$OUTPUT_FILE"
-        else
-          ffmpeg -i video_only.mkv -i "$SOURCE_FILE" \
-            -map 0:v \
-            -map 1:a \
-            $AUDIO_FLAGS \
-            -c:v copy \
-            "$OUTPUT_FILE"
-        fi
-
-    - name: Encode report
-      if: always()
-      run: |
-        if [[ -f "$OUTPUT_FILE" ]]; then
-          SRC_SIZE=$(stat -c %s "$SOURCE_FILE")
-          OUT_SIZE=$(stat -c %s "$OUTPUT_FILE")
-          RATIO=$(python3 -c "print(str(round($OUT_SIZE/$SRC_SIZE*100,1))+'%')")
-          echo "### Encode Result"                                      >> $GITHUB_STEP_SUMMARY
-          echo "| | Size |"                                             >> $GITHUB_STEP_SUMMARY
-          echo "| --- | --- |"                                          >> $GITHUB_STEP_SUMMARY
-          echo "| Source | $(numfmt --to=iec $SRC_SIZE)B |"            >> $GITHUB_STEP_SUMMARY
-          echo "| Output | $(numfmt --to=iec $OUT_SIZE)B |"            >> $GITHUB_STEP_SUMMARY
-          echo "| Ratio  | $RATIO of source |"                         >> $GITHUB_STEP_SUMMARY
-        else
-          echo "Output file not found — encode likely failed."          >> $GITHUB_STEP_SUMMARY
-        fi
-        echo "### Last 30 lines of encode log" >> $GITHUB_STEP_SUMMARY
-        echo '```'                             >> $GITHUB_STEP_SUMMARY
-        tail -30 encode.log                   >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
-        echo '```'                             >> $GITHUB_STEP_SUMMARY
-
-    - name: Upload encoded video
-      uses: actions/upload-artifact@v4
-      if: success()
-      with:
-        name: "${{ inputs.output_name }}"
-        path: "${{ inputs.output_name }}.mkv"
-        retention-days: 7
-        compression-level: 0
-
-    - name: Upload encode log
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: "${{ inputs.output_name }}-log"
-        path: encode.log
-        retention-days: 7
-        
+      # ── 6. Upload ─────────────────────────────────────────────────────────
+      - name: Upload encoded episode
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.episode_name }}
+          path: ${{ github.workspace }}/output/${{ github.event.inputs.episode_name }}.mkv
+          retention-days: 7
+          compression-level: 0
+          
