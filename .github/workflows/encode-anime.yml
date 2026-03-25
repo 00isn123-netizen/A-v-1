@@ -41,13 +41,13 @@ jobs:
       # ── 2. Download source ────────────────────────────────────────────────
       - name: Download source
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/input" "$GITHUB_WORKSPACE/output"
+          mkdir -p input output
           aria2c \
             --file-allocation=none \
             -x 16 -s 16 -k 1M \
             "${{ github.event.inputs.episode_url }}" \
-            -o "$GITHUB_WORKSPACE/input/source.mkv"
-          echo "Source size: $(du -sh "$GITHUB_WORKSPACE/input/source.mkv" | cut -f1)"
+            -o "input/source.mkv"
+          echo "Source size: $(du -sh "input/source.mkv" | cut -f1)"
 
       # ── 3. Write VapourSynth filter script ───────────────────────────────
       - name: Write filter script
@@ -55,17 +55,17 @@ jobs:
           sed \
             -e 's|NATIVE_HEIGHT   = 900|NATIVE_HEIGHT   = ${{ github.event.inputs.native_height }}|' \
             -e 's|DENOISE_H        = 1.4|DENOISE_H        = ${{ github.event.inputs.denoise_h }}|' \
-            "$GITHUB_WORKSPACE/filter.vpy" > "$GITHUB_WORKSPACE/input/filter.vpy"
+            "filter.vpy" > "input/filter.vpy"
           if [ "${{ github.event.inputs.native_height }}" = "0" ]; then
-            sed -i 's/DESCALE         = True/DESCALE         = False/' "$GITHUB_WORKSPACE/input/filter.vpy"
+            sed -i 's/DESCALE         = True/DESCALE         = False/' "input/filter.vpy"
           fi
 
       # ── 4. Encode ─────────────────────────────────────────────────────────
       - name: Encode with av1an
         run: |
-          INPUT="$GITHUB_WORKSPACE/input/source.mkv" \
+          INPUT="input/source.mkv" \
           av1an \
-            -i "$GITHUB_WORKSPACE/input/filter.vpy" \
+            -i "input/filter.vpy" \
             -e svt-av1 \
             --video-params "\
               --crf ${{ github.event.inputs.crf }} \
@@ -82,16 +82,16 @@ jobs:
             -a "-c:a libopus -b:a 64k -vbr on -compression_level 10" \
             -s 60 \
             --sc-method ffmpeg \
-            -o "$GITHUB_WORKSPACE/output/${{ github.event.inputs.episode_name }}.mkv"
+            -o "output/${{ github.event.inputs.episode_name }}.mkv"
 
       # ── 5. Print stats ────────────────────────────────────────────────────
       - name: Print encode stats
         run: |
           echo "──────────────────────────────────"
-          echo "Source:  $(du -sh "$GITHUB_WORKSPACE/input/source.mkv" | cut -f1)"
-          echo "Output:  $(du -sh "$GITHUB_WORKSPACE/output/${{ github.event.inputs.episode_name }}.mkv" | cut -f1)"
+          echo "Source:  $(du -sh "input/source.mkv" | cut -f1)"
+          echo "Output:  $(du -sh "output/${{ github.event.inputs.episode_name }}.mkv" | cut -f1)"
           echo "──────────────────────────────────"
-          mediainfo "$GITHUB_WORKSPACE/output/${{ github.event.inputs.episode_name }}.mkv" | \
+          mediainfo "output/${{ github.event.inputs.episode_name }}.mkv" | \
             grep -E "Duration|Bit rate|Format|Width|Height|Frame rate"
 
       # ── 6. Upload ─────────────────────────────────────────────────────────
@@ -99,7 +99,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.episode_name }}
-          path: ${{ github.workspace }}/output/${{ github.event.inputs.episode_name }}.mkv
+          path: output/${{ github.event.inputs.episode_name }}.mkv
           retention-days: 7
           compression-level: 0
-          
