@@ -38,17 +38,31 @@ jobs:
       - name: Download
         run: curl -L "${{ github.event.inputs.video_url }}" -o source.mkv
 
-      - name: Slice
+      - name: Slice (4 equal chunks)
         run: |
+          # Get duration in seconds (float)
+          DURATION=$(ffprobe -v error \
+            -analyzeduration 100M -probesize 100M \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            source.mkv)
+
+          # Calculate 25% of duration, rounded to nearest second
+          CHUNK=$(echo "$DURATION / 4" | bc)
+          echo "Video duration: ${DURATION}s — chunk size: ${CHUNK}s"
+
           ffmpeg \
             -analyzeduration 100M -probesize 100M \
             -i source.mkv \
             -map 0:v -map 0:a -map 0:s? \
             -c copy \
-            -segment_time 00:06:00 \
+            -segment_time "$CHUNK" \
             -f segment \
             -segment_format matroska \
             "part_%02d.mkv"
+
+          echo "Chunks created:"
+          ls -lh part_*.mkv
 
       - id: set-matrix
         run: |
