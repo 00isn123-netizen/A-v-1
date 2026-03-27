@@ -6,21 +6,22 @@ on:
         description: 'Direct Link to Video (MKV/MP4)'
         required: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   split-video:
     runs-on: ubuntu-latest
     outputs:
       matrix_json: ${{ steps.set-matrix.outputs.matrix_json }}
     steps:
-      - name: Cache ffmpeg (Jellyfin)
-        id: cache-ffmpeg
-        uses: actions/cache@v4
+      - name: Cache apt packages
+        uses: actions/cache@v5
         with:
-          path: ~/jellyfin-ffmpeg
-          key: jellyfin-ffmpeg7-ubuntu-24
+          path: /var/cache/apt/archives
+          key: apt-jellyfin-ffmpeg7-${{ runner.os }}
 
-      - name: Install ffmpeg (if not cached)
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+      - name: Install ffmpeg
         run: |
           curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
             | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/jellyfin.gpg
@@ -28,17 +29,40 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/jellyfin.list
           sudo apt-get update
           sudo apt-get install -y jellyfin-ffmpeg7
-          # Copy to home dir so cache action can read/write it without sudo
-          cp -r /usr/lib/jellyfin-ffmpeg ~/jellyfin-ffmpeg
-
-      - name: Add ffmpeg to PATH
-        run: echo "$HOME/jellyfin-ffmpeg" >> $GITHUB_PATH
+          echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
 
       - name: Verify ffmpeg + svtav1
         run: ffmpeg -encoders 2>/dev/null | grep svtav1
 
       - name: Download
-        run: curl -L "${{ github.event.inputs.video_url }}" -o source.mkv
+        run: |
+          # --fail: error on HTTP failures
+          # --retry 3: retry on transient errors
+          # --location: follow redirects
+          # URL is passed via env var to avoid shell interpretation of special chars
+          curl --fail --retry 3 --location \
+            --output source.mkv \
+            --progress-bar \
+            "$VIDEO_URL"
+
+          # Verify file is not empty and looks like a valid MKV/media file
+          SIZE=$(stat -c%s source.mkv)
+          echo "Downloaded: ${SIZE} bytes"
+          if [ "$SIZE" -lt 1000000 ]; then
+            echo "ERROR: File too small, download likely failed"
+            exit 1
+          fi
+
+          # Check file magic bytes (MKV starts with 0x1A45DFA3)
+          MAGIC=$(xxd -p -l 4 source.mkv)
+          echo "File magic: $MAGIC"
+          if [ "$MAGIC" != "1a45dfa3" ]; then
+            echo "WARNING: File does not appear to be MKV, may be HTML error page"
+            head -c 500 source.mkv
+            exit 1
+          fi
+        env:
+          VIDEO_URL: ${{ github.event.inputs.video_url }}
 
       - name: Slice (4 equal chunks)
         run: |
@@ -70,7 +94,7 @@ jobs:
           echo "matrix_json=$FILES" >> $GITHUB_OUTPUT
 
       - name: Upload Chunks
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: raw-chunks
           path: part_*.mkv
@@ -84,15 +108,13 @@ jobs:
       matrix:
         part: ${{ fromJson(needs.split-video.outputs.matrix_json) }}
     steps:
-      - name: Cache ffmpeg (Jellyfin)
-        id: cache-ffmpeg
-        uses: actions/cache@v4
+      - name: Cache apt packages
+        uses: actions/cache@v5
         with:
-          path: ~/jellyfin-ffmpeg
-          key: jellyfin-ffmpeg7-ubuntu-24
+          path: /var/cache/apt/archives
+          key: apt-jellyfin-ffmpeg7-${{ runner.os }}
 
-      - name: Install ffmpeg (if not cached)
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+      - name: Install ffmpeg
         run: |
           curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
             | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/jellyfin.gpg
@@ -100,16 +122,13 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/jellyfin.list
           sudo apt-get update
           sudo apt-get install -y jellyfin-ffmpeg7
-          cp -r /usr/lib/jellyfin-ffmpeg ~/jellyfin-ffmpeg
-
-      - name: Add ffmpeg to PATH
-        run: echo "$HOME/jellyfin-ffmpeg" >> $GITHUB_PATH
+          echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
 
       - name: Verify ffmpeg + svtav1
         run: ffmpeg -encoders 2>/dev/null | grep svtav1
 
       - name: Download Chunk
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: raw-chunks
 
@@ -129,7 +148,7 @@ jobs:
             "$OUTNAME"
 
       - name: Upload Encoded
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: encoded-${{ strategy.job-index }}
           path: "*-encoded.mkv"
@@ -139,15 +158,13 @@ jobs:
     needs: encode-parts
     runs-on: ubuntu-latest
     steps:
-      - name: Cache ffmpeg (Jellyfin)
-        id: cache-ffmpeg
-        uses: actions/cache@v4
+      - name: Cache apt packages
+        uses: actions/cache@v5
         with:
-          path: ~/jellyfin-ffmpeg
-          key: jellyfin-ffmpeg7-ubuntu-24
+          path: /var/cache/apt/archives
+          key: apt-jellyfin-ffmpeg7-${{ runner.os }}
 
-      - name: Install ffmpeg (if not cached)
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+      - name: Install ffmpeg
         run: |
           curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
             | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/jellyfin.gpg
@@ -155,16 +172,13 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/jellyfin.list
           sudo apt-get update
           sudo apt-get install -y jellyfin-ffmpeg7
-          cp -r /usr/lib/jellyfin-ffmpeg ~/jellyfin-ffmpeg
-
-      - name: Add ffmpeg to PATH
-        run: echo "$HOME/jellyfin-ffmpeg" >> $GITHUB_PATH
+          echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
 
       - name: Verify ffmpeg
         run: ffmpeg -version
 
       - name: Download All
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: encoded-parts
           pattern: encoded-*
@@ -178,7 +192,7 @@ jobs:
           ffmpeg -f concat -safe 0 -i list.txt -c copy final_mini_encode.mkv
 
       - name: Final Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: final-result
           path: final_mini_encode.mkv
