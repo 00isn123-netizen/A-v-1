@@ -64,7 +64,7 @@ jobs:
         env:
           VIDEO_URL: ${{ github.event.inputs.video_url }}
 
-      - name: Slice (12 equal chunks)
+      - name: Slice (20 equal chunks)
         run: |
           DURATION=$(ffprobe -v error \
             -analyzeduration 100M -probesize 100M \
@@ -72,7 +72,7 @@ jobs:
             -of default=noprint_wrappers=1:nokey=1 \
             source.mkv)
 
-          CHUNK=$(echo "$DURATION / 12" | bc)
+          CHUNK=$(echo "$DURATION / 20" | bc)
           echo "Video duration: ${DURATION}s — chunk size: ${CHUNK}s"
 
           ffmpeg \
