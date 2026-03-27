@@ -1,4 +1,4 @@
-name: Matrix AV1 Encoder (High Power)
+name: Matrix AV1 Encoder (Corrected)
 on:
   workflow_dispatch:
     inputs:
@@ -7,75 +7,73 @@ on:
         required: true
 
 jobs:
-  # STEP 1: Split the video into 4 chunks (6 mins each for a 24m anime)
-  # Runs on 1 VM (2 cores)
   split-video:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      matrix_json: ${{ steps.set-matrix.outputs.matrix_json }}
     steps:
-      - name: Maximize Disk Space
+      - name: Free Disk Space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-      - name: Download Source
+      - name: Download
         run: curl -L "${{ github.event.inputs.video_url }}" -o source.mp4
-      - name: Slice into 6-minute chunks
+      - name: Slice
         run: |
+          # Split into 6-minute segments
           ffmpeg -i source.mp4 -c copy -map 0 -segment_time 00:06:00 -f segment "part_%02d.mp4"
       - id: set-matrix
         run: |
-          # Automatically detects how many parts were created
-          JSON=$(find . -name "part_*.mp4" | sort | jq -R . | jq -s -c .)
-          echo "matrix=$JSON" >> $GITHUB_OUTPUT
-      - name: Upload Chunks
+          # Creates a valid JSON array of filenames for the matrix
+          FILES=$(ls part_*.mp4 | jq -R -s -c 'split("\n")[:-1]')
+          echo "matrix_json=$FILES" >> $GITHUB_OUTPUT
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: raw-chunks
           path: part_*.mp4
+          retention-days: 1
 
-  # STEP 2: The Matrix (The "Fact" Check)
-  # GitHub spins up a NEW VM for every part found. 
-  # If 4 parts = 4 VMs = 8 CORES total infrastructure.
   encode-parts:
     needs: split-video
     runs-on: ubuntu-latest
     strategy:
-      matrix:
-        part: ${{组(needs.split-video.outputs.matrix)}}
       fail-fast: false
+      matrix:
+        # This now correctly references the JSON array from the split job
+        part: ${{ fromJson(needs.split-video.outputs.matrix_json) }}
     steps:
-      - name: Download Specific Chunk
+      - name: Download Chunk
         uses: actions/download-artifact@v4
         with:
           name: raw-chunks
-      - name: Encode with Preset 4 (CRF 50)
+      - name: Encode (Preset 4, CRF 50)
         run: |
-          # Preset 4 is heavy, so we lock 2 threads to 2 cores
+          # 2 cores = 2 threads. Preset 4 is the heavy lifter here.
           ffmpeg -i "${{ matrix.part }}" \
             -c:v libsvtav1 -preset 4 -crf 50 \
             -svtav1-params tune=0:enable-overlays=1:tile-columns=1 \
-            -threads 2 -c:a libopus -b:a 128k \
+            -c:a libopus -b:a 128k -threads 2 \
             "${{ matrix.part }}.mkv"
-      - name: Upload Encoded Chunk
+      - name: Upload Encoded
         uses: actions/upload-artifact@v4
         with:
           name: encoded-${{ matrix.part }}
           path: "${{ matrix.part }}.mkv"
+          retention-days: 1
 
-  # STEP 3: Final Merge
-  # Joins the 4 parts into 1 final file
   merge-video:
     needs: encode-parts
     runs-on: ubuntu-latest
     steps:
-      - name: Download All Encoded Parts
+      - name: Download All
         uses: actions/download-artifact@v4
-      - name: Merge Parts
+      - name: Merge
         run: |
-          # Create concat list
+          # Find all mkv files across the downloaded artifact folders
           find . -name "part_*.mkv" | sort | sed "s/^/file '/;s/$/'/" > list.txt
           ffmpeg -f concat -safe 0 -i list.txt -c copy final_mini_encode.mkv
-      - name: Upload Final Result
+      - name: Final Upload
         uses: actions/upload-artifact@v4
         with:
-          name: final-video
+          name: final-result
           path: final_mini_encode.mkv
+          
