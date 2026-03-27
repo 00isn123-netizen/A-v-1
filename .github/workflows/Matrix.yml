@@ -40,7 +40,7 @@ jobs:
           # --retry 3: retry on transient errors
           # --location: follow redirects
           # URL is passed via env var to avoid shell interpretation of special chars
-          curl --fail --retry 3 --location \
+          curl --fail --retry 3 --location --globoff \
             --output source.mkv \
             --progress-bar \
             "$VIDEO_URL"
