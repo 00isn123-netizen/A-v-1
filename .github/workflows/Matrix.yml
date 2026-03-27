@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: 'Direct Link to 2GB Video'
+        description: 'Direct Link to Video (MKV/MP4)'
         required: true
 
 jobs:
@@ -16,7 +16,9 @@ jobs:
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
-          path: /usr/local/bin/ffmpeg
+          path: |
+            /usr/local/bin/ffmpeg
+            /usr/local/bin/ffprobe
           key: ffmpeg-static-amd64
 
       - name: Install ffmpeg (if not cached)
@@ -30,23 +32,30 @@ jobs:
         run: ffmpeg -version
 
       - name: Download
-        run: curl -L "${{ github.event.inputs.video_url }}" -o source.mp4
+        run: curl -L "${{ github.event.inputs.video_url }}" -o source.mkv
 
       - name: Slice
         run: |
-          ffmpeg -i source.mp4 -c copy -map 0 \
-            -segment_time 00:06:00 -f segment "part_%02d.mp4"
+          ffmpeg \
+            -analyzeduration 100M -probesize 100M \
+            -i source.mkv \
+            -map 0:v -map 0:a -map 0:s? \
+            -c copy \
+            -segment_time 00:06:00 \
+            -f segment \
+            -segment_format matroska \
+            "part_%02d.mkv"
 
       - id: set-matrix
         run: |
-          FILES=$(ls part_*.mp4 | jq -R -s -c 'split("\n")[:-1]')
+          FILES=$(ls part_*.mkv | jq -R -s -c 'split("\n")[:-1]')
           echo "matrix_json=$FILES" >> $GITHUB_OUTPUT
 
       - name: Upload Chunks
         uses: actions/upload-artifact@v4
         with:
           name: raw-chunks
-          path: part_*.mp4
+          path: part_*.mkv
           retention-days: 1
 
   encode-parts:
@@ -61,7 +70,9 @@ jobs:
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
-          path: /usr/local/bin/ffmpeg
+          path: |
+            /usr/local/bin/ffmpeg
+            /usr/local/bin/ffprobe
           key: ffmpeg-static-amd64
 
       - name: Install ffmpeg (if not cached)
@@ -82,18 +93,23 @@ jobs:
       - name: Encode (Preset 4, CRF 50)
         run: |
           OUTNAME="${{ matrix.part }}"
-          OUTNAME="${OUTNAME%.mp4}.mkv"
-          ffmpeg -i "${{ matrix.part }}" \
+          OUTNAME="${OUTNAME%.mkv}-encoded.mkv"
+          ffmpeg \
+            -analyzeduration 100M -probesize 100M \
+            -i "${{ matrix.part }}" \
+            -map 0:v -map 0:a -map 0:s? \
             -c:v libsvtav1 -preset 4 -crf 50 \
             -svtav1-params tune=0:enable-overlays=1:tile-columns=1 \
-            -c:a libopus -b:a 128k -threads 2 \
+            -c:a libopus -b:a 128k \
+            -c:s copy \
+            -threads 2 \
             "$OUTNAME"
 
       - name: Upload Encoded
         uses: actions/upload-artifact@v4
         with:
           name: encoded-${{ strategy.job-index }}
-          path: "*.mkv"
+          path: "*-encoded.mkv"
           retention-days: 1
 
   merge-video:
@@ -104,7 +120,9 @@ jobs:
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
-          path: /usr/local/bin/ffmpeg
+          path: |
+            /usr/local/bin/ffmpeg
+            /usr/local/bin/ffprobe
           key: ffmpeg-static-amd64
 
       - name: Install ffmpeg (if not cached)
@@ -126,7 +144,7 @@ jobs:
 
       - name: Merge
         run: |
-          find encoded-parts -name "*.mkv" | sort | \
+          find encoded-parts -name "*-encoded.mkv" | sort | \
             sed "s/^/file '/;s/$/'/" > list.txt
           cat list.txt
           ffmpeg -f concat -safe 0 -i list.txt -c copy final_mini_encode.mkv
