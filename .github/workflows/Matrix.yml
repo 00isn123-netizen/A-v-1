@@ -17,18 +17,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /usr/lib/jellyfin-ffmpeg
-          key: jellyfin-ffmpeg-ubuntu-22
+          key: jellyfin-ffmpeg7-ubuntu-24
 
       - name: Install ffmpeg (if not cached)
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get install -y curl gnupg
           curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
             | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/jellyfin.gpg
-          echo "deb [arch=amd64] https://repo.jellyfin.org/ubuntu jammy main" \
+          echo "deb [arch=amd64] https://repo.jellyfin.org/ubuntu noble main" \
             | sudo tee /etc/apt/sources.list.d/jellyfin.list
           sudo apt-get update
-          sudo apt-get install -y jellyfin-ffmpeg6
+          sudo apt-get install -y jellyfin-ffmpeg7
 
       - name: Add ffmpeg to PATH
         run: echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
@@ -76,18 +75,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /usr/lib/jellyfin-ffmpeg
-          key: jellyfin-ffmpeg-ubuntu-22
+          key: jellyfin-ffmpeg7-ubuntu-24
 
       - name: Install ffmpeg (if not cached)
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get install -y curl gnupg
           curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
             | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/jellyfin.gpg
-          echo "deb [arch=amd64] https://repo.jellyfin.org/ubuntu jammy main" \
+          echo "deb [arch=amd64] https://repo.jellyfin.org/ubuntu noble main" \
             | sudo tee /etc/apt/sources.list.d/jellyfin.list
           sudo apt-get update
-          sudo apt-get install -y jellyfin-ffmpeg6
+          sudo apt-get install -y jellyfin-ffmpeg7
 
       - name: Add ffmpeg to PATH
         run: echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
@@ -131,18 +129,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /usr/lib/jellyfin-ffmpeg
-          key: jellyfin-ffmpeg-ubuntu-22
+          key: jellyfin-ffmpeg7-ubuntu-24
 
       - name: Install ffmpeg (if not cached)
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get install -y curl gnupg
           curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
             | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/jellyfin.gpg
-          echo "deb [arch=amd64] https://repo.jellyfin.org/ubuntu jammy main" \
+          echo "deb [arch=amd64] https://repo.jellyfin.org/ubuntu noble main" \
             | sudo tee /etc/apt/sources.list.d/jellyfin.list
           sudo apt-get update
-          sudo apt-get install -y jellyfin-ffmpeg6
+          sudo apt-get install -y jellyfin-ffmpeg7
 
       - name: Add ffmpeg to PATH
         run: echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
