@@ -1,4 +1,4 @@
-name: Matrix AV1 Encoder (Corrected)
+name: Matrix AV1 Encoder (Fixed)
 on:
   workflow_dispatch:
     inputs:
@@ -12,19 +12,19 @@ jobs:
     outputs:
       matrix_json: ${{ steps.set-matrix.outputs.matrix_json }}
     steps:
-      - name: Free Disk Space
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
       - name: Download
         run: curl -L "${{ github.event.inputs.video_url }}" -o source.mp4
+
       - name: Slice
         run: |
-          # Split into 6-minute segments
-          ffmpeg -i source.mp4 -c copy -map 0 -segment_time 00:06:00 -f segment "part_%02d.mp4"
+          ffmpeg -i source.mp4 -c copy -map 0 \
+            -segment_time 00:06:00 -f segment "part_%02d.mp4"
+
       - id: set-matrix
         run: |
-          # Creates a valid JSON array of filenames for the matrix
           FILES=$(ls part_*.mp4 | jq -R -s -c 'split("\n")[:-1]')
           echo "matrix_json=$FILES" >> $GITHUB_OUTPUT
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
@@ -38,26 +38,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # This now correctly references the JSON array from the split job
         part: ${{ fromJson(needs.split-video.outputs.matrix_json) }}
     steps:
       - name: Download Chunk
         uses: actions/download-artifact@v4
         with:
           name: raw-chunks
+
       - name: Encode (Preset 4, CRF 50)
         run: |
-          # 2 cores = 2 threads. Preset 4 is the heavy lifter here.
+          # Strip .mp4 extension for a clean output name
+          OUTNAME="${{ matrix.part }}"
+          OUTNAME="${OUTNAME%.mp4}.mkv"
           ffmpeg -i "${{ matrix.part }}" \
             -c:v libsvtav1 -preset 4 -crf 50 \
             -svtav1-params tune=0:enable-overlays=1:tile-columns=1 \
             -c:a libopus -b:a 128k -threads 2 \
-            "${{ matrix.part }}.mkv"
+            "$OUTNAME"
+
+      # FIX: artifact name used a dot-containing filename; use matrix index instead
       - name: Upload Encoded
         uses: actions/upload-artifact@v4
         with:
-          name: encoded-${{ matrix.part }}
-          path: "${{ matrix.part }}.mkv"
+          name: encoded-${{ strategy.job-index }}
+          path: "*.mkv"
           retention-days: 1
 
   merge-video:
@@ -66,14 +70,22 @@ jobs:
     steps:
       - name: Download All
         uses: actions/download-artifact@v4
+        with:
+          # FIX: merge into a flat directory so find works predictably
+          path: encoded-parts
+          pattern: encoded-*
+          merge-multiple: true
+
       - name: Merge
         run: |
-          # Find all mkv files across the downloaded artifact folders
-          find . -name "part_*.mkv" | sort | sed "s/^/file '/;s/$/'/" > list.txt
+          # FIX: pattern matches clean *.mkv names, sorted correctly
+          find encoded-parts -name "*.mkv" | sort | \
+            sed "s/^/file '/;s/$/'/" > list.txt
+          cat list.txt  # log for debugging
           ffmpeg -f concat -safe 0 -i list.txt -c copy final_mini_encode.mkv
+
       - name: Final Upload
         uses: actions/upload-artifact@v4
         with:
           name: final-result
           path: final_mini_encode.mkv
-          
