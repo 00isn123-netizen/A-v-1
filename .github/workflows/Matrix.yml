@@ -12,24 +12,29 @@ jobs:
     outputs:
       matrix_json: ${{ steps.set-matrix.outputs.matrix_json }}
     steps:
-      - name: Cache ffmpeg
+      - name: Cache ffmpeg (Jellyfin)
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
-          path: |
-            /usr/local/bin/ffmpeg
-            /usr/local/bin/ffprobe
-          key: ffmpeg-static-amd64
+          path: /usr/lib/jellyfin-ffmpeg
+          key: jellyfin-ffmpeg-ubuntu-22
 
       - name: Install ffmpeg (if not cached)
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
-            | tar -xJ --wildcards --strip-components=1 '*/ffmpeg' '*/ffprobe'
-          sudo mv ffmpeg ffprobe /usr/local/bin/
+          sudo apt-get install -y curl gnupg
+          curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
+            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/jellyfin.gpg
+          echo "deb [arch=amd64] https://repo.jellyfin.org/ubuntu jammy main" \
+            | sudo tee /etc/apt/sources.list.d/jellyfin.list
+          sudo apt-get update
+          sudo apt-get install -y jellyfin-ffmpeg6
 
-      - name: Verify ffmpeg
-        run: ffmpeg -version
+      - name: Add ffmpeg to PATH
+        run: echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
+
+      - name: Verify ffmpeg + svtav1
+        run: ffmpeg -encoders 2>/dev/null | grep svtav1
 
       - name: Download
         run: curl -L "${{ github.event.inputs.video_url }}" -o source.mkv
@@ -66,24 +71,29 @@ jobs:
       matrix:
         part: ${{ fromJson(needs.split-video.outputs.matrix_json) }}
     steps:
-      - name: Cache ffmpeg
+      - name: Cache ffmpeg (Jellyfin)
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
-          path: |
-            /usr/local/bin/ffmpeg
-            /usr/local/bin/ffprobe
-          key: ffmpeg-static-amd64
+          path: /usr/lib/jellyfin-ffmpeg
+          key: jellyfin-ffmpeg-ubuntu-22
 
       - name: Install ffmpeg (if not cached)
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
-            | tar -xJ --wildcards --strip-components=1 '*/ffmpeg' '*/ffprobe'
-          sudo mv ffmpeg ffprobe /usr/local/bin/
+          sudo apt-get install -y curl gnupg
+          curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
+            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/jellyfin.gpg
+          echo "deb [arch=amd64] https://repo.jellyfin.org/ubuntu jammy main" \
+            | sudo tee /etc/apt/sources.list.d/jellyfin.list
+          sudo apt-get update
+          sudo apt-get install -y jellyfin-ffmpeg6
 
-      - name: Verify ffmpeg
-        run: ffmpeg -version
+      - name: Add ffmpeg to PATH
+        run: echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
+
+      - name: Verify ffmpeg + svtav1
+        run: ffmpeg -encoders 2>/dev/null | grep svtav1
 
       - name: Download Chunk
         uses: actions/download-artifact@v4
@@ -116,21 +126,26 @@ jobs:
     needs: encode-parts
     runs-on: ubuntu-latest
     steps:
-      - name: Cache ffmpeg
+      - name: Cache ffmpeg (Jellyfin)
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
-          path: |
-            /usr/local/bin/ffmpeg
-            /usr/local/bin/ffprobe
-          key: ffmpeg-static-amd64
+          path: /usr/lib/jellyfin-ffmpeg
+          key: jellyfin-ffmpeg-ubuntu-22
 
       - name: Install ffmpeg (if not cached)
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
-            | tar -xJ --wildcards --strip-components=1 '*/ffmpeg' '*/ffprobe'
-          sudo mv ffmpeg ffprobe /usr/local/bin/
+          sudo apt-get install -y curl gnupg
+          curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
+            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/jellyfin.gpg
+          echo "deb [arch=amd64] https://repo.jellyfin.org/ubuntu jammy main" \
+            | sudo tee /etc/apt/sources.list.d/jellyfin.list
+          sudo apt-get update
+          sudo apt-get install -y jellyfin-ffmpeg6
+
+      - name: Add ffmpeg to PATH
+        run: echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
 
       - name: Verify ffmpeg
         run: ffmpeg -version
