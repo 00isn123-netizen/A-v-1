@@ -1,4 +1,4 @@
-name: Matrix AV1 Encoder (Fixed)
+name: Matrix AV1 Encoder
 on:
   workflow_dispatch:
     inputs:
@@ -12,6 +12,23 @@ jobs:
     outputs:
       matrix_json: ${{ steps.set-matrix.outputs.matrix_json }}
     steps:
+      - name: Cache ffmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/ffmpeg
+          key: ffmpeg-static-amd64
+
+      - name: Install ffmpeg (if not cached)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+            | tar -xJ --wildcards --strip-components=1 '*/ffmpeg' '*/ffprobe'
+          sudo mv ffmpeg ffprobe /usr/local/bin/
+
+      - name: Verify ffmpeg
+        run: ffmpeg -version
+
       - name: Download
         run: curl -L "${{ github.event.inputs.video_url }}" -o source.mp4
 
@@ -25,7 +42,7 @@ jobs:
           FILES=$(ls part_*.mp4 | jq -R -s -c 'split("\n")[:-1]')
           echo "matrix_json=$FILES" >> $GITHUB_OUTPUT
 
-      - name: Upload
+      - name: Upload Chunks
         uses: actions/upload-artifact@v4
         with:
           name: raw-chunks
@@ -40,6 +57,23 @@ jobs:
       matrix:
         part: ${{ fromJson(needs.split-video.outputs.matrix_json) }}
     steps:
+      - name: Cache ffmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/ffmpeg
+          key: ffmpeg-static-amd64
+
+      - name: Install ffmpeg (if not cached)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+            | tar -xJ --wildcards --strip-components=1 '*/ffmpeg' '*/ffprobe'
+          sudo mv ffmpeg ffprobe /usr/local/bin/
+
+      - name: Verify ffmpeg
+        run: ffmpeg -version
+
       - name: Download Chunk
         uses: actions/download-artifact@v4
         with:
@@ -47,7 +81,6 @@ jobs:
 
       - name: Encode (Preset 4, CRF 50)
         run: |
-          # Strip .mp4 extension for a clean output name
           OUTNAME="${{ matrix.part }}"
           OUTNAME="${OUTNAME%.mp4}.mkv"
           ffmpeg -i "${{ matrix.part }}" \
@@ -56,7 +89,6 @@ jobs:
             -c:a libopus -b:a 128k -threads 2 \
             "$OUTNAME"
 
-      # FIX: artifact name used a dot-containing filename; use matrix index instead
       - name: Upload Encoded
         uses: actions/upload-artifact@v4
         with:
@@ -68,20 +100,35 @@ jobs:
     needs: encode-parts
     runs-on: ubuntu-latest
     steps:
+      - name: Cache ffmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/ffmpeg
+          key: ffmpeg-static-amd64
+
+      - name: Install ffmpeg (if not cached)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+            | tar -xJ --wildcards --strip-components=1 '*/ffmpeg' '*/ffprobe'
+          sudo mv ffmpeg ffprobe /usr/local/bin/
+
+      - name: Verify ffmpeg
+        run: ffmpeg -version
+
       - name: Download All
         uses: actions/download-artifact@v4
         with:
-          # FIX: merge into a flat directory so find works predictably
           path: encoded-parts
           pattern: encoded-*
           merge-multiple: true
 
       - name: Merge
         run: |
-          # FIX: pattern matches clean *.mkv names, sorted correctly
           find encoded-parts -name "*.mkv" | sort | \
             sed "s/^/file '/;s/$/'/" > list.txt
-          cat list.txt  # log for debugging
+          cat list.txt
           ffmpeg -f concat -safe 0 -i list.txt -c copy final_mini_encode.mkv
 
       - name: Final Upload
