@@ -16,7 +16,7 @@ jobs:
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
-          path: /usr/lib/jellyfin-ffmpeg
+          path: ~/jellyfin-ffmpeg
           key: jellyfin-ffmpeg7-ubuntu-24
 
       - name: Install ffmpeg (if not cached)
@@ -28,9 +28,11 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/jellyfin.list
           sudo apt-get update
           sudo apt-get install -y jellyfin-ffmpeg7
+          # Copy to home dir so cache action can read/write it without sudo
+          cp -r /usr/lib/jellyfin-ffmpeg ~/jellyfin-ffmpeg
 
       - name: Add ffmpeg to PATH
-        run: echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
+        run: echo "$HOME/jellyfin-ffmpeg" >> $GITHUB_PATH
 
       - name: Verify ffmpeg + svtav1
         run: ffmpeg -encoders 2>/dev/null | grep svtav1
@@ -40,14 +42,12 @@ jobs:
 
       - name: Slice (4 equal chunks)
         run: |
-          # Get duration in seconds (float)
           DURATION=$(ffprobe -v error \
             -analyzeduration 100M -probesize 100M \
             -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 \
             source.mkv)
 
-          # Calculate 25% of duration, rounded to nearest second
           CHUNK=$(echo "$DURATION / 4" | bc)
           echo "Video duration: ${DURATION}s — chunk size: ${CHUNK}s"
 
@@ -88,7 +88,7 @@ jobs:
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
-          path: /usr/lib/jellyfin-ffmpeg
+          path: ~/jellyfin-ffmpeg
           key: jellyfin-ffmpeg7-ubuntu-24
 
       - name: Install ffmpeg (if not cached)
@@ -100,9 +100,10 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/jellyfin.list
           sudo apt-get update
           sudo apt-get install -y jellyfin-ffmpeg7
+          cp -r /usr/lib/jellyfin-ffmpeg ~/jellyfin-ffmpeg
 
       - name: Add ffmpeg to PATH
-        run: echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
+        run: echo "$HOME/jellyfin-ffmpeg" >> $GITHUB_PATH
 
       - name: Verify ffmpeg + svtav1
         run: ffmpeg -encoders 2>/dev/null | grep svtav1
@@ -142,7 +143,7 @@ jobs:
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
-          path: /usr/lib/jellyfin-ffmpeg
+          path: ~/jellyfin-ffmpeg
           key: jellyfin-ffmpeg7-ubuntu-24
 
       - name: Install ffmpeg (if not cached)
@@ -154,9 +155,10 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/jellyfin.list
           sudo apt-get update
           sudo apt-get install -y jellyfin-ffmpeg7
+          cp -r /usr/lib/jellyfin-ffmpeg ~/jellyfin-ffmpeg
 
       - name: Add ffmpeg to PATH
-        run: echo "/usr/lib/jellyfin-ffmpeg" >> $GITHUB_PATH
+        run: echo "$HOME/jellyfin-ffmpeg" >> $GITHUB_PATH
 
       - name: Verify ffmpeg
         run: ffmpeg -version
