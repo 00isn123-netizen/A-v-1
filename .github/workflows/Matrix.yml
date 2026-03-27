@@ -79,7 +79,11 @@ jobs:
             -analyzeduration 100M -probesize 100M \
             -i source.mkv \
             -map 0:v -map 0:a -map 0:s? \
-            -c copy \
+            -c:v copy \
+            -c:a libopus \
+            -b:a 96k \
+            -ar 48000 \
+            -ac 2 \
             -segment_time "$CHUNK" \
             -f segment \
             -segment_format matroska \
