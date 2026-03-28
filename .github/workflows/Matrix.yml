@@ -18,6 +18,10 @@ on:
         description: 'Number of chunks to split into (more = more parallelism)'
         default: '10'
 
+permissions:
+  actions: write
+  contents: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -84,13 +88,26 @@ jobs:
           CHUNK=$(awk "BEGIN {printf \"%d\", $DURATION / $CHUNK_COUNT}")
           echo "Video duration: ${DURATION}s — ${CHUNK_COUNT} chunks of ~${CHUNK}s"
 
+          # Map only text-based subs, skip bitmap formats (PGS, DVDSUB)
+          SUB_MAPS=""
+          STREAM_IDX=0
+          while IFS= read -r CODEC; do
+            if [[ "$CODEC" != "hdmv_pgs_subtitle" && "$CODEC" != "dvd_subtitle" ]]; then
+              SUB_MAPS="$SUB_MAPS -map 0:s:$STREAM_IDX"
+            fi
+            STREAM_IDX=$((STREAM_IDX + 1))
+          done < <(ffprobe -v error -select_streams s \
+            -show_entries stream=codec_name \
+            -of csv=p=0 source.mkv 2>/dev/null || true)
+          echo "Subtitle maps: ${SUB_MAPS:-none}"
+
           ffmpeg \
             -analyzeduration 100M -probesize 100M \
             -i source.mkv \
-            -map 0:v -map 0:a -map 0:s? \
+            -map 0:v -map 0:a $SUB_MAPS \
             -c:v copy \
             -c:a copy \
-            -force_key_frames "expr:gte(t,n_forced*$CHUNK)" \
+            -c:s copy \
             -segment_time "$CHUNK" \
             -segment_time_delta 0.05 \
             -f segment \
@@ -151,10 +168,24 @@ jobs:
         run: |
           OUTNAME="${{ matrix.part }}"
           OUTNAME="${OUTNAME%.mkv}-encoded.mkv"
+
+          # Map only text-based subs, skip bitmap formats (PGS, DVDSUB)
+          SUB_MAPS=""
+          STREAM_IDX=0
+          while IFS= read -r CODEC; do
+            if [[ "$CODEC" != "hdmv_pgs_subtitle" && "$CODEC" != "dvd_subtitle" ]]; then
+              SUB_MAPS="$SUB_MAPS -map 0:s:$STREAM_IDX"
+            fi
+            STREAM_IDX=$((STREAM_IDX + 1))
+          done < <(ffprobe -v error -select_streams s \
+            -show_entries stream=codec_name \
+            -of csv=p=0 "${{ matrix.part }}" 2>/dev/null || true)
+          echo "Subtitle maps: ${SUB_MAPS:-none}"
+
           ffmpeg \
             -analyzeduration 100M -probesize 100M \
             -i "${{ matrix.part }}" \
-            -map 0:v -map 0:a -map 0:s? \
+            -map 0:v -map 0:a $SUB_MAPS \
             -c:v libsvtav1 \
             -preset ${{ github.event.inputs.preset }} \
             -crf ${{ github.event.inputs.crf }} \
@@ -235,3 +266,17 @@ jobs:
         with:
           name: final-result
           path: "${{ github.event.inputs.output_name }}.mkv"
+
+  cleanup:
+    needs: merge-video
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Delete intermediate artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts \
+            --paginate --jq '.artifacts[] | select(.name != "final-result") | .id' | \
+            xargs -I{} gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/{}
+          echo "Intermediate artifacts deleted."
