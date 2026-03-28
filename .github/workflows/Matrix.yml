@@ -5,6 +5,15 @@ on:
       video_url:
         description: 'Direct Link to Video (MKV/MP4)'
         required: true
+      crf:
+        description: 'CRF value (lower = better quality, 23–55)'
+        default: '50'
+      preset:
+        description: 'SVT-AV1 preset (0=slowest/best, 13=fastest)'
+        default: '4'
+      output_name:
+        description: 'Output filename (without extension)'
+        default: 'encoded'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -12,11 +21,13 @@ env:
 jobs:
   split-video:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       matrix_json: ${{ steps.set-matrix.outputs.matrix_json }}
+      chunk_count: ${{ steps.set-matrix.outputs.chunk_count }}
     steps:
       - name: Cache apt packages
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
           key: apt-jellyfin-ffmpeg7-${{ runner.os }}
@@ -36,16 +47,11 @@ jobs:
 
       - name: Download
         run: |
-          # --fail: error on HTTP failures
-          # --retry 3: retry on transient errors
-          # --location: follow redirects
-          # URL is passed via env var to avoid shell interpretation of special chars
           curl --fail --retry 3 --location --globoff \
             --output source.mkv \
             --progress-bar \
             "$VIDEO_URL"
 
-          # Verify file is not empty and looks like a valid MKV/media file
           SIZE=$(stat -c%s source.mkv)
           echo "Downloaded: ${SIZE} bytes"
           if [ "$SIZE" -lt 1000000 ]; then
@@ -53,7 +59,6 @@ jobs:
             exit 1
           fi
 
-          # Check file magic bytes (MKV starts with 0x1A45DFA3)
           MAGIC=$(xxd -p -l 4 source.mkv)
           echo "File magic: $MAGIC"
           if [ "$MAGIC" != "1a45dfa3" ]; then
@@ -64,7 +69,7 @@ jobs:
         env:
           VIDEO_URL: ${{ github.event.inputs.video_url }}
 
-      - name: Slice (20 equal chunks)
+      - name: Slice (~5 min chunks, keyframe-aligned)
         run: |
           DURATION=$(ffprobe -v error \
             -analyzeduration 100M -probesize 100M \
@@ -72,19 +77,20 @@ jobs:
             -of default=noprint_wrappers=1:nokey=1 \
             source.mkv)
 
-          CHUNK=$(echo "$DURATION / 20" | bc)
-          echo "Video duration: ${DURATION}s — chunk size: ${CHUNK}s"
+          # Target ~5 minute chunks; minimum 1 chunk
+          CHUNK_COUNT=$(awk "BEGIN {c=int($DURATION/300)+1; print (c<1?1:c)}")
+          CHUNK=$(awk "BEGIN {printf \"%d\", $DURATION / $CHUNK_COUNT}")
+          echo "Video duration: ${DURATION}s — ${CHUNK_COUNT} chunks of ~${CHUNK}s"
 
           ffmpeg \
             -analyzeduration 100M -probesize 100M \
             -i source.mkv \
             -map 0:v -map 0:a -map 0:s? \
             -c:v copy \
-            -c:a libopus \
-            -b:a 96k \
-            -ar 48000 \
-            -ac 2 \
+            -c:a copy \
+            -force_key_frames "expr:gte(t,n_forced*$CHUNK)" \
             -segment_time "$CHUNK" \
+            -segment_time_delta 0.05 \
             -f segment \
             -segment_format matroska \
             "part_%02d.mkv"
@@ -95,10 +101,12 @@ jobs:
       - id: set-matrix
         run: |
           FILES=$(ls part_*.mkv | jq -R -s -c 'split("\n")[:-1]')
+          COUNT=$(ls part_*.mkv | wc -l)
           echo "matrix_json=$FILES" >> $GITHUB_OUTPUT
+          echo "chunk_count=$COUNT" >> $GITHUB_OUTPUT
 
       - name: Upload Chunks
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: raw-chunks
           path: part_*.mkv
@@ -107,13 +115,14 @@ jobs:
   encode-parts:
     needs: split-video
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         part: ${{ fromJson(needs.split-video.outputs.matrix_json) }}
     steps:
       - name: Cache apt packages
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
           key: apt-jellyfin-ffmpeg7-${{ runner.os }}
@@ -132,11 +141,11 @@ jobs:
         run: ffmpeg -encoders 2>/dev/null | grep svtav1
 
       - name: Download Chunk
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           name: raw-chunks
 
-      - name: Encode (Preset 4, CRF 50)
+      - name: Encode
         run: |
           OUTNAME="${{ matrix.part }}"
           OUTNAME="${OUTNAME%.mkv}-encoded.mkv"
@@ -144,26 +153,29 @@ jobs:
             -analyzeduration 100M -probesize 100M \
             -i "${{ matrix.part }}" \
             -map 0:v -map 0:a -map 0:s? \
-            -c:v libsvtav1 -preset 4 -crf 50 \
-            -svtav1-params tune=0:enable-overlays=1:tile-columns=1 \
+            -c:v libsvtav1 \
+            -preset ${{ github.event.inputs.preset }} \
+            -crf ${{ github.event.inputs.crf }} \
+            -svtav1-params tune=2:enable-overlays=1:tile-columns=1 \
             -c:a libopus -b:a 128k \
             -c:s copy \
-            -threads 2 \
+            -threads $(nproc) \
             "$OUTNAME"
 
       - name: Upload Encoded
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
-          name: encoded-${{ strategy.job-index }}
+          name: encoded-${{ matrix.part }}
           path: "*-encoded.mkv"
           retention-days: 1
 
   merge-video:
-    needs: encode-parts
+    needs: [split-video, encode-parts]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Cache apt packages
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
           key: apt-jellyfin-ffmpeg7-${{ runner.os }}
@@ -182,21 +194,42 @@ jobs:
         run: ffmpeg -version
 
       - name: Download All
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           path: encoded-parts
           pattern: encoded-*
           merge-multiple: true
+
+      - name: Verify chunk count
+        run: |
+          EXPECTED="${{ needs.split-video.outputs.chunk_count }}"
+          ACTUAL=$(find encoded-parts -name "*-encoded.mkv" | wc -l)
+          echo "Expected ${EXPECTED} chunks, found ${ACTUAL}"
+          if [ "$ACTUAL" -ne "$EXPECTED" ]; then
+            echo "ERROR: Chunk count mismatch — one or more encode jobs likely failed"
+            exit 1
+          fi
 
       - name: Merge
         run: |
           find encoded-parts -name "*-encoded.mkv" | sort | \
             sed "s/^/file '/;s/$/'/" > list.txt
           cat list.txt
-          ffmpeg -f concat -safe 0 -i list.txt -c copy final_mini_encode.mkv
+          OUTPUT_NAME="${{ github.event.inputs.output_name }}"
+          ffmpeg -f concat -safe 0 -i list.txt -c copy "${OUTPUT_NAME}.mkv"
+
+      - name: Summary
+        run: |
+          OUTPUT_NAME="${{ github.event.inputs.output_name }}"
+          FINAL=$(stat -c%s "${OUTPUT_NAME}.mkv")
+          echo "### ✅ Encode Complete" >> $GITHUB_STEP_SUMMARY
+          echo "- **Output:** \`${OUTPUT_NAME}.mkv\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **CRF:** ${{ github.event.inputs.crf }} | **Preset:** ${{ github.event.inputs.preset }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Output size:** $(numfmt --to=iec $FINAL)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Chunks merged:** ${{ needs.split-video.outputs.chunk_count }}" >> $GITHUB_STEP_SUMMARY
 
       - name: Final Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: final-result
-          path: final_mini_encode.mkv
+          path: "${{ github.event.inputs.output_name }}.mkv"
