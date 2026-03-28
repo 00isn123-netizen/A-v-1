@@ -485,7 +485,7 @@ jobs:
             sed "s/^/file '/;s/$/'/" > list.txt
           cat list.txt
           OUTPUT_NAME="${{ github.event.inputs.output_name }}"
-          ffmpeg -f concat -safe 0 -i list.txt -c copy "${OUTPUT_NAME}.mkv"
+          ffmpeg -f concat -safe 0 -i list.txt -map 0 -c copy "${OUTPUT_NAME}.mkv"
 
       - name: Summary
         run: |
