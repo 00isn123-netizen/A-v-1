@@ -14,6 +14,9 @@ on:
       output_name:
         description: 'Output filename (without extension)'
         default: 'encoded'
+      chunk_count:
+        description: 'Number of chunks to split into (more = more parallelism)'
+        default: '10'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -69,7 +72,7 @@ jobs:
         env:
           VIDEO_URL: ${{ github.event.inputs.video_url }}
 
-      - name: Slice (~5 min chunks, keyframe-aligned)
+      - name: Slice (${{ github.event.inputs.chunk_count }} chunks, keyframe-aligned)
         run: |
           DURATION=$(ffprobe -v error \
             -analyzeduration 100M -probesize 100M \
@@ -77,8 +80,7 @@ jobs:
             -of default=noprint_wrappers=1:nokey=1 \
             source.mkv)
 
-          # Target ~5 minute chunks; minimum 1 chunk
-          CHUNK_COUNT=$(awk "BEGIN {c=int($DURATION/300)+1; print (c<1?1:c)}")
+          CHUNK_COUNT=${{ github.event.inputs.chunk_count }}
           CHUNK=$(awk "BEGIN {printf \"%d\", $DURATION / $CHUNK_COUNT}")
           echo "Video duration: ${DURATION}s — ${CHUNK_COUNT} chunks of ~${CHUNK}s"
 
