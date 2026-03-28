@@ -157,7 +157,7 @@ jobs:
             -preset ${{ github.event.inputs.preset }} \
             -crf ${{ github.event.inputs.crf }} \
             -svtav1-params tune=2:enable-overlays=1:tile-columns=1 \
-            -c:a libopus -b:a 128k \
+            -c:a libopus -b:a 64k \
             -c:s copy \
             -threads $(nproc) \
             "$OUTNAME"
