@@ -168,28 +168,63 @@ jobs:
         shell: python
         run: |
           script = r"""
-          # Lightweight progress logger — writes a JSON line to stdout so it
-          # appears in the job log. No cross-job IPC; the monitor job uses the
-          # GitHub REST API to track overall completion instead.
-          import sys, json
-          payload  = sys.argv[1]
-          part_id  = sys.argv[2]
+          import os, sys, json, time, urllib.request
+
+          cache_url = os.environ['ACTIONS_CACHE_URL']
+          token     = os.environ['ACTIONS_RUNTIME_TOKEN']
+          run_id    = os.environ['GITHUB_RUN_ID']
+          payload   = sys.argv[1]
+          part_id   = sys.argv[2]
+
+          # Stable prefix per chunk per run — used for delete + prefix-read
+          prefix  = f"enc-prog-{run_id}-{part_id}"
+          key     = f"{prefix}-{int(time.time())}"
+          content = payload.encode()
+
+          hdrs = {
+              'Authorization': f'Bearer {token}',
+              'Content-Type':  'application/json',
+              'Accept':        'application/json;api-version=6.0-preview.1',
+          }
+
           try:
-              data = json.loads(payload)
-              pct  = data.get('progress', 0)
-              spd  = data.get('speed', 0)
-              eta  = data.get('eta_seconds', 0)
-              done = data.get('finished', False)
-              if done:
-                  mb = data.get('size_bytes', 0) / 1_048_576
-                  print(f"[{part_id}] ✅ done — {mb:.1f} MB", flush=True)
-              else:
-                  bar = '▰' * int(pct / 100 * 20) + '▱' * (20 - int(pct / 100 * 20))
-                  print(f"[{part_id}] {bar} {pct:5.1f}%  {spd:.2f}x  ETA {int(eta)}s", flush=True)
+              # 0. Delete all previous entries for this chunk to avoid pile-up
+              del_hdrs = {k: v for k, v in hdrs.items() if k != 'Content-Type'}
+              req = urllib.request.Request(
+                  f"{cache_url}_apis/artifactcache/caches?key={prefix}",
+                  headers=del_hdrs, method='DELETE')
+              try:
+                  urllib.request.urlopen(req, timeout=10)
+              except Exception:
+                  pass  # 404 = no prior entries yet, fine
+
+              # 1. Reserve a new cache slot
+              req = urllib.request.Request(
+                  f"{cache_url}_apis/artifactcache/caches",
+                  data=json.dumps({"key": key, "version": run_id}).encode(),
+                  headers=hdrs, method='POST')
+              with urllib.request.urlopen(req, timeout=10) as r:
+                  cache_id = json.load(r)['cacheId']
+
+              # 2. Upload payload bytes
+              up_hdrs = {**hdrs,
+                         'Content-Type':  'application/octet-stream',
+                         'Content-Range': f'bytes 0-{len(content)-1}/*'}
+              req = urllib.request.Request(
+                  f"{cache_url}_apis/artifactcache/caches/{cache_id}",
+                  data=content, headers=up_hdrs, method='PATCH')
+              urllib.request.urlopen(req, timeout=10)
+
+              # 3. Commit
+              req = urllib.request.Request(
+                  f"{cache_url}_apis/artifactcache/caches/{cache_id}",
+                  data=json.dumps({"size": len(content)}).encode(),
+                  headers=hdrs, method='POST')
+              urllib.request.urlopen(req, timeout=10)
+
           except Exception as e:
               print(f"[progress] push failed: {e}", file=sys.stderr)
           """
-          # Strip leading indentation so the file is valid Python
           import textwrap, pathlib
           pathlib.Path("/tmp/push_progress.py").write_text(textwrap.dedent(script).lstrip())
 
@@ -256,7 +291,7 @@ jobs:
             fi
 
             python3 /tmp/push_progress.py \
-              "{\"chunk\":\"$PART_ID\",\"progress\":$PROGRESS,\"speed\":$SPEED,\"eta_seconds\":$ETA,\"size_bytes\":$SIZE,\"elapsed_seconds\":$ELAPSED,\"total_frames\":$TOTAL_FRAMES,\"current_frame\":$FRAME,\"finished\":false}" \
+              "{\"chunk\":\"$PART_ID\",\"progress\":$PROGRESS,\"speed\":$SPEED,\"fps\":$FPS,\"eta_seconds\":$ETA,\"size_bytes\":$SIZE,\"elapsed_seconds\":$ELAPSED,\"total_frames\":$TOTAL_FRAMES,\"current_frame\":$FRAME,\"finished\":false}" \
               "$PART_ID"
           done
 
@@ -264,11 +299,11 @@ jobs:
           EXIT_CODE=$?
           [ $EXIT_CODE -ne 0 ] && { echo "FFmpeg failed (exit $EXIT_CODE)"; exit $EXIT_CODE; }
 
-          # Log final snapshot
+          # Push final snapshot
           ELAPSED=$(($(date +%s) - START_TIME))
           FINAL_SIZE=$(stat -c%s "$OUTNAME" 2>/dev/null || echo 0)
           python3 /tmp/push_progress.py \
-            "{\"chunk\":\"$PART_ID\",\"progress\":100.0,\"speed\":0,\"eta_seconds\":0,\"size_bytes\":$FINAL_SIZE,\"elapsed_seconds\":$ELAPSED,\"total_frames\":$TOTAL_FRAMES,\"current_frame\":$TOTAL_FRAMES,\"finished\":true}" \
+            "{\"chunk\":\"$PART_ID\",\"progress\":100.0,\"speed\":0,\"fps\":0,\"eta_seconds\":0,\"size_bytes\":$FINAL_SIZE,\"elapsed_seconds\":$ELAPSED,\"total_frames\":$TOTAL_FRAMES,\"current_frame\":$TOTAL_FRAMES,\"finished\":true}" \
             "$PART_ID"
 
       # FIX: Artifact names cannot contain dots — strip the .mkv extension first.
@@ -286,11 +321,11 @@ jobs:
           path: "*-encoded.mkv"
           retention-days: 1
 
-  # Runs in parallel with encode-parts — no dependency on it.
-  # Polls the GitHub REST API every 30s to report per-chunk job status.
-  # This replaces the previous cache-service IPC approach, which required
-  # ACTIONS_CACHE_URL — a runner-internal variable not reliably available
-  # across separate jobs.
+  # Runs in parallel with encode-parts.
+  # Reads live ffmpeg progress from the Actions cache service (written by each
+  # encode job every 20s) and prints a rich combined view every 30s.
+  # Each chunk always has exactly 1 cache entry — push_progress.py deletes the
+  # previous entry before writing a new one, so nothing piles up.
   monitor:
     needs: split-video
     runs-on: ubuntu-latest
@@ -299,61 +334,42 @@ jobs:
       - name: Watch encode progress
         shell: python
         env:
-          CHUNKS:     ${{ needs.split-video.outputs.matrix_json }}
-          RUN_ID:     ${{ github.run_id }}
-          REPO:       ${{ github.repository }}
-          GH_TOKEN:   ${{ secrets.GITHUB_TOKEN }}
+          CHUNKS:  ${{ needs.split-video.outputs.matrix_json }}
+          RUN_ID:  ${{ github.run_id }}
         run: |
-          import os, json, time, urllib.request, urllib.error
+          import os, json, time, urllib.request
           from datetime import timedelta
 
-          gh_token = os.environ['GH_TOKEN']
-          run_id   = os.environ['RUN_ID']
-          repo     = os.environ['REPO']
-          chunks   = json.loads(os.environ['CHUNKS'])
-          parts    = [c.replace('.mkv', '') for c in chunks]
-          total    = len(parts)
+          # ACTIONS_CACHE_URL and ACTIONS_RUNTIME_TOKEN are injected by the
+          # runner for every job — no need to pass them manually.
+          cache_url = os.environ['ACTIONS_CACHE_URL']
+          token     = os.environ['ACTIONS_RUNTIME_TOKEN']
+          run_id    = os.environ['RUN_ID']
+          chunks    = json.loads(os.environ['CHUNKS'])
+          parts     = [c.replace('.mkv', '') for c in chunks]
+          total     = len(parts)
 
-          API = "https://api.github.com"
           HDRS = {
-              'Authorization':        f'Bearer {gh_token}',
-              'Accept':               'application/vnd.github+json',
-              'X-GitHub-Api-Version': '2022-11-28',
+              'Authorization': f'Bearer {token}',
+              'Accept':        'application/json;api-version=6.0-preview.1',
           }
 
-          def gh_get(url):
-              req = urllib.request.Request(url, headers=HDRS)
+          def fetch(part_id):
+              """Read the latest progress entry for a chunk from the cache."""
+              prefix = f"enc-prog-{run_id}-{part_id}"
+              url    = (f"{cache_url}_apis/artifactcache/cache"
+                        f"?keys={prefix}&version={run_id}")
               try:
-                  with urllib.request.urlopen(req, timeout=15) as r:
-                      return json.load(r)
-              except urllib.error.HTTPError as e:
-                  print(f"[monitor] HTTP {e.code} — {url}", flush=True)
+                  req = urllib.request.Request(url, headers=HDRS)
+                  with urllib.request.urlopen(req, timeout=10) as r:
+                      result = json.load(r)
+                  loc = result.get('archiveLocation')
+                  if not loc:
+                      return None
+                  with urllib.request.urlopen(loc, timeout=10) as r:
+                      return json.loads(r.read().decode())
+              except Exception:
                   return None
-              except Exception as e:
-                  print(f"[monitor] request error — {e}", flush=True)
-                  return None
-
-          def get_encode_jobs():
-              """
-              Fetch all jobs for this run (paginated) and return only the
-              encode-parts matrix jobs, keyed by their matrix part name.
-              Job names look like: 'encode-parts (part_00.mkv)'
-              """
-              jobs = {}
-              url  = f"{API}/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"
-              while url:
-                  data = gh_get(url)
-                  if not data:
-                      break
-                  for j in data.get('jobs', []):
-                      name = j.get('name', '')
-                      if name.startswith('encode-parts (') and name.endswith(')'):
-                          part_file = name[len('encode-parts ('):-1]   # e.g. 'part_00.mkv'
-                          part_id   = part_file.replace('.mkv', '')     # e.g. 'part_00'
-                          jobs[part_id] = j
-                  # Follow Link: <url>; rel="next" header if present
-                  url = None  # urllib doesn't expose headers easily; single page is usually enough
-              return jobs
 
           def bar(pct, w=20):
               f = int(pct / 100 * w)
@@ -362,78 +378,88 @@ jobs:
           def hms(s):
               return str(timedelta(seconds=max(0, int(s))))
 
-          def job_duration(j):
-              """Return elapsed seconds for a job, or 0 if not started."""
-              import datetime
-              started = j.get('started_at')
-              if not started:
-                  return 0
-              fmt = '%Y-%m-%dT%H:%M:%SZ'
-              start_dt = datetime.datetime.strptime(started, fmt)
-              completed = j.get('completed_at')
-              if completed:
-                  end_dt = datetime.datetime.strptime(completed, fmt)
-              else:
-                  end_dt = datetime.datetime.utcnow()
-              return max(0, int((end_dt - start_dt).total_seconds()))
+          def fmt_size(b):
+              b = int(b)
+              if b >= 1_073_741_824: return f"{b/1_073_741_824:.2f} GB"
+              if b >= 1_048_576:     return f"{b/1_048_576:.1f} MB"
+              return f"{b/1024:.1f} KB"
 
-          # Status → display values
-          STATUS_ICON = {
-              'queued':      '⏳',
-              'in_progress': '🔄',
-              'completed':   None,   # use conclusion instead
-          }
-          CONCLUSION_ICON = {
-              'success':   '✅',
-              'failure':   '❌',
-              'cancelled': '🚫',
-              'skipped':   '⏭️',
-          }
-
-          W     = 60
+          W     = 68
           start = time.time()
+          last  = {}
 
           while True:
-              jobs    = get_encode_jobs()
-              elapsed = time.time() - start
+              for part in parts:
+                  d = fetch(part)
+                  if d:
+                      last[part] = d
 
-              done    = sum(1 for j in jobs.values() if j.get('status') == 'completed')
-              active  = [j for j in jobs.values() if j.get('status') == 'in_progress']
-              waiting = total - len(jobs)   # runners not yet assigned
+              elapsed  = time.time() - start
+              done     = [s for s in last.values() if s.get('finished')]
+              active   = [s for s in last.values() if not s.get('finished')]
+              waiting  = total - len(last)
+              n_done   = len(done)
 
-              # Overall progress: treat each completed job as 100%, active as 50%
-              pct_total = ((done * 100 + len(active) * 50) / total) if total else 0
+              # ── summary stats ──────────────────────────────────────────────
+              all_rep   = list(last.values())
+              avg_pct   = sum(s.get('progress', 0) for s in all_rep) / total if total else 0
+              tot_fps   = sum(s.get('fps',   0) for s in active)
+              tot_speed = sum(s.get('speed', 0) for s in active)
+              avg_eta   = (sum(s.get('eta_seconds', 0) for s in active)
+                           / len(active)) if active else 0
 
-              print('━' * W)
-              print(f"  📊 MATRIX ENCODE PROGRESS   [{hms(elapsed)} elapsed]")
-              print('━' * W)
-              print(f"  Chunks  : {done}/{total} done"
-                    + (f"  ({len(active)} encoding)" if active else "")
-                    + (f"  ({waiting} waiting for runner)" if waiting else ""))
-              print(f"  Overall : {bar(pct_total)}  {pct_total:.0f}%")
-              print('━' * W)
+              # Estimate total output size from completed chunks
+              done_sizes  = [s.get('size_bytes', 0) for s in done if s.get('size_bytes', 0) > 0]
+              avg_chunk   = (sum(done_sizes) / len(done_sizes)) if done_sizes else 0
+              est_total   = avg_chunk * total if avg_chunk else 0
+              actual_done = sum(done_sizes)
+
+              print('═' * W)
+              print(f"  📊 MATRIX AV1 ENCODE  ·  run #{run_id}  ·  {hms(elapsed)} elapsed")
+              print('═' * W)
+              print(f"  Progress : {bar(avg_pct)}  {avg_pct:.1f}%   "
+                    f"({n_done}/{total} done"
+                    + (f" · {len(active)} active" if active else "")
+                    + (f" · {waiting} waiting" if waiting else "") + ")")
+              if active:
+                  print(f"  Speed    : {tot_speed:.2f}x total  ·  {tot_fps:.0f} fps total")
+                  print(f"  ETA      : ~{hms(avg_eta)} remaining (avg across active)")
+              if est_total:
+                  print(f"  Size out : ~{fmt_size(est_total)} est. total  "
+                        f"({fmt_size(actual_done)} written so far)")
+              print('─' * W)
+              print(f"  {'#':<5} {'status':<9} {'elapsed':<10} "
+                    f"{'progress':<24} {'speed':<8} {'fps':<7} {'ETA':<10} {'size'}")
+              print('  ' + '─' * (W - 2))
 
               for i, part in enumerate(parts):
-                  j   = jobs.get(part)
+                  s   = last.get(part)
                   idx = f"[{i:02d}]"
-                  if j is None:
-                      print(f"  {idx} ⏳ waiting for runner…")
+                  if s is None:
+                      print(f"  {idx}  {'⏳ waiting':<9}")
+                      continue
+
+                  el   = hms(s.get('elapsed_seconds', 0))
+                  sz   = fmt_size(s.get('size_bytes', 0)) if s.get('size_bytes', 0) else '—'
+
+                  if s.get('finished'):
+                      print(f"  {idx}  {'✅ done':<9} {el:<10} "
+                            f"{'▰'*20:<24} {'—':<8} {'—':<7} {'—':<10} {sz}")
                   else:
-                      status     = j.get('status', '')
-                      conclusion = j.get('conclusion', '')
-                      dur        = job_duration(j)
-                      if status == 'completed':
-                          icon = CONCLUSION_ICON.get(conclusion, '❓')
-                          print(f"  {idx} {icon}  {hms(dur)}")
-                      elif status == 'in_progress':
-                          print(f"  {idx} 🔄  {hms(dur)} elapsed")
-                      else:
-                          print(f"  {idx} ⏳ queued")
+                      pct  = s.get('progress', 0)
+                      spd  = s.get('speed',    0)
+                      fps  = s.get('fps',      0)
+                      eta  = hms(s.get('eta_seconds', 0))
+                      b    = bar(pct)
+                      print(f"  {idx}  {'🔄 enc':<9} {el:<10} "
+                            f"{b+f' {pct:4.1f}%':<24} {spd:<8.2f} {fps:<7.0f} {eta:<10} {sz}")
 
-              print('━' * W, flush=True)
+              print('═' * W, flush=True)
 
-              if done == total and total > 0:
-                  print(f"\n✅ All {total} chunks finished.")
+              if n_done == total and total > 0:
+                  total_size = sum(s.get('size_bytes', 0) for s in done)
+                  print(f"\n✅ All {total} chunks finished.  "
+                        f"Total output size: {fmt_size(total_size)}")
                   break
 
               time.sleep(30)
